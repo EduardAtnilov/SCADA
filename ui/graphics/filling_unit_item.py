@@ -85,7 +85,7 @@ class FillingPackagingUnitImageItem(QGraphicsObject):
         )
 
         id_font = QFont()
-        id_font.setPointSizeF(7.4)
+        id_font.setPointSizeF(10)
         id_font.setBold(True)
 
         painter.setFont(id_font)
@@ -94,7 +94,7 @@ class FillingPackagingUnitImageItem(QGraphicsObject):
         painter.drawText(
             QRectF(
                 -36,
-                -42,
+                -32,
                 self.image_width + 72,
                 15,
             ),
@@ -103,7 +103,7 @@ class FillingPackagingUnitImageItem(QGraphicsObject):
         )
 
         title_font = QFont()
-        title_font.setPointSizeF(6.5)
+        title_font.setPointSizeF(8)
         title_font.setBold(True)
 
         painter.setFont(title_font)
@@ -112,7 +112,7 @@ class FillingPackagingUnitImageItem(QGraphicsObject):
         painter.drawText(
             QRectF(
                 -46,
-                -26,
+                -16,
                 self.image_width + 92,
                 14,
             ),

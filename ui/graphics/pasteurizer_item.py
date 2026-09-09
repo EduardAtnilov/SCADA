@@ -91,7 +91,7 @@ class PasteurizerImageItem(QGraphicsObject):
         )
 
         id_font = QFont()
-        id_font.setPointSizeF(7.4)
+        id_font.setPointSizeF(10)
         id_font.setBold(True)
 
         painter.setFont(id_font)
@@ -109,7 +109,7 @@ class PasteurizerImageItem(QGraphicsObject):
         )
 
         title_font = QFont()
-        title_font.setPointSizeF(6.6)
+        title_font.setPointSizeF(8)
         title_font.setBold(True)
 
         painter.setFont(title_font)

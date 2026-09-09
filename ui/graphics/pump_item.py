@@ -48,7 +48,7 @@ class PumpImageItem(QGraphicsObject):
         painter.drawPixmap(0, 0, self.pixmap)
 
         id_font = QFont()
-        id_font.setPointSizeF(6.8)
+        id_font.setPointSizeF(10)
         id_font.setBold(True)
         painter.setFont(id_font)
         painter.setPen(QColor("#101827"))
@@ -56,7 +56,7 @@ class PumpImageItem(QGraphicsObject):
 
         if self.title:
             title_font = QFont()
-            title_font.setPointSizeF(6.1)
+            title_font.setPointSizeF(8)
             painter.setFont(title_font)
             painter.setPen(QColor("#34445c"))
             painter.drawText(QRectF(-14, self.image_height + 14, self.image_width + 28, 14), Qt.AlignmentFlag.AlignCenter, self.title)

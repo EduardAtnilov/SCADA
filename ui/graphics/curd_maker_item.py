@@ -73,7 +73,7 @@ class CurdMakerImageItem(QGraphicsObject):
         )
 
         id_font = QFont()
-        id_font.setPointSizeF(7.2)
+        id_font.setPointSizeF(10)
         id_font.setBold(True)
 
         painter.setFont(id_font)
@@ -82,7 +82,7 @@ class CurdMakerImageItem(QGraphicsObject):
         painter.drawText(
             QRectF(
                 -20,
-                -40,
+                -10,
                 self.image_width + 40,
                 15,
             ),
@@ -91,7 +91,7 @@ class CurdMakerImageItem(QGraphicsObject):
         )
 
         title_font = QFont()
-        title_font.setPointSizeF(6.5)
+        title_font.setPointSizeF(8)
         title_font.setBold(True)
 
         painter.setFont(title_font)
@@ -100,7 +100,7 @@ class CurdMakerImageItem(QGraphicsObject):
         painter.drawText(
             QRectF(
                 -30,
-                -24,
+                6,
                 self.image_width + 60,
                 14,
             ),

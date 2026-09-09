@@ -64,16 +64,21 @@ class TankImageItem(QGraphicsObject):
         self.setZValue(40)
 
     def boundingRect(self) -> QRectF:
-        return QRectF(-28, -40, self.image_width + 56, self.image_height + 48)
+        return QRectF(
+            -36,
+            -50,
+            self.image_width + 72,
+            self.image_height + 58,
+        )
 
     def paint(self, painter: QPainter, option, widget=None):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        id_font = QFont(); id_font.setPointSizeF(7.2); id_font.setBold(True)
+        id_font = QFont(); id_font.setPointSizeF(10); id_font.setBold(True)
         painter.setFont(id_font)
         painter.setPen(QColor("#111827"))
         painter.drawText(QRectF(-28, -48, self.image_width + 56, 15), Qt.AlignmentFlag.AlignCenter, self.equipment_id)
         if self.title:
-            title_font = QFont(); title_font.setPointSizeF(6.2); title_font.setBold(True)
+            title_font = QFont(); title_font.setPointSizeF(8); title_font.setBold(True)
             painter.setFont(title_font)
             painter.setPen(QColor("#334155"))
             painter.drawText(QRectF(-36, -32, self.image_width + 72, 14), Qt.AlignmentFlag.AlignCenter, self.title)

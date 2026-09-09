@@ -8,6 +8,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPolygonF,
+    QTransform,
 )
 from PySide6.QtWidgets import (
     QGraphicsPathItem,
@@ -222,7 +223,6 @@ class EquipmentScene(QGraphicsScene):
             self.storage_tanks.append(tank)
             x += 82
 
-        self.add_centered_label("MILK STORAGE", self.STORAGE_X + 200, self.STORAGE_Y - 76, color="#0b2c6b")
 
     def _storage_bottom_port(self, tank) -> QPointF:
         # Storage tanks use exactly the same standard bottom port
@@ -238,21 +238,59 @@ class EquipmentScene(QGraphicsScene):
     def draw_pumps(self):
         self.pumps = {}
 
-        storage_pump = self._create_pump("storage", "01-PM1", self.STORAGE_PUMP_X, self.STORAGE_PUMP_Y)
-        storage_ports = [self._storage_bottom_port(tank) for tank in self.storage_tanks]
-        storage_center_x = (storage_ports[0].x() + storage_ports[-1].x()) / 2.0
-
-        # Keep the pump itself centered under the four tanks.
-        # The upper pipeline is then routed to the REAL upper nozzle,
-        # so changing the port moves the line instead of moving the pump.
-        pump_center_x = (
-            storage_pump.scenePos().x()
-            + storage_pump.image_width * 0.50
+        storage_pump = self._create_pump(
+            "storage",
+            "01-PM1",
+            self.STORAGE_PUMP_X,
+            self.STORAGE_PUMP_Y,
         )
 
-        storage_pump.moveBy(
-            storage_center_x - pump_center_x,
-            0,
+        # Only 01-PM1 is mirrored.
+        # Labels remain normal because we mirror the PNG, not the whole item.
+        original_left_local = storage_pump.mapFromScene(
+            storage_pump.left_port()
+        )
+        original_top_local = storage_pump.mapFromScene(
+            storage_pump.top_port()
+        )
+
+        storage_pump.pixmap = storage_pump.pixmap.transformed(
+            QTransform().scale(-1.0, 1.0),
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+        # After the horizontal mirror:
+        # - the former LEFT nozzle is visually on the RIGHT and becomes
+        #   the suction from the four storage tanks;
+        # - the top nozzle remains the discharge to the pasteurizer riser.
+        storage_pump._storage_suction_local = QPointF(
+            storage_pump.image_width - original_left_local.x(),
+            original_left_local.y(),
+        )
+        storage_pump._storage_discharge_local = QPointF(
+            storage_pump.image_width - original_top_local.x(),
+            original_top_local.y(),
+        )
+
+        storage_ports = [
+            self._storage_bottom_port(tank)
+            for tank in self.storage_tanks
+        ]
+        manifold_y = (
+            max(port.y() for port in storage_ports)
+            + 26.0
+        )
+
+        # Put 01-PM1 directly into the lower-left elbow:
+        # horizontal collector enters the RIGHT nozzle,
+        # upper nozzle sits on the vertical riser.
+        storage_riser_x = 24.0
+
+        storage_pump.setPos(
+            storage_riser_x
+            - storage_pump._storage_discharge_local.x(),
+            manifold_y
+            - storage_pump._storage_suction_local.y(),
         )
 
         self._create_pump("pasteurizer", "02-PM1", self.PASTEURIZER_PUMP_X, self.PASTEURIZER_PUMP_Y)
@@ -366,10 +404,16 @@ class EquipmentScene(QGraphicsScene):
         self._draw_whey_route()
 
     def _draw_storage_route(self):
-        tank_outlets = [self._storage_bottom_port(tank) for tank in self.storage_tanks]
+        tank_outlets = [
+            self._storage_bottom_port(tank)
+            for tank in self.storage_tanks
+        ]
 
-        # Общий коллектор опускаем ниже, чтобы он визуально не прилипал к днищам баков.
-        manifold_y = max(outlet.y() for outlet in tank_outlets) + 26.0
+        # Keep the existing collector level.
+        manifold_y = (
+            max(outlet.y() for outlet in tank_outlets)
+            + 26.0
+        )
 
         for outlet in tank_outlets:
             self.add_pipe(
@@ -380,40 +424,35 @@ class EquipmentScene(QGraphicsScene):
                 self.milk_pen,
             )
 
-        # Горизонтальная объединяющая линия от баков.
-        self.add_pipe(
-            [
-                (tank_outlets[0].x(), manifold_y),
-                (tank_outlets[-1].x(), manifold_y),
-            ],
-            self.milk_pen,
+        storage_pump = self.pumps["storage"]
+
+        # Real visual ports of the mirrored 01-PM1.
+        pump_in = storage_pump.mapToScene(
+            storage_pump._storage_suction_local
+        )
+        pump_out = storage_pump.mapToScene(
+            storage_pump._storage_discharge_local
         )
 
-        storage_pump = self.pumps["storage"]
-        pump_top = storage_pump.top_port()
-        pump_left = storage_pump.left_port()
-
-        # Подвод к верхнему патрубку насоса — строго в патрубок, с небольшим перекрытием.
-        # Vertical branch goes directly into the real upper nozzle.
-        # The port itself is now shifted left to match the visible fitting.
+        # Four storage tanks -> common horizontal collector ->
+        # RIGHT suction nozzle of the mirrored 01-PM1.
         self.add_pipe(
             [
-                (pump_top.x(), manifold_y),
-                (pump_top.x(), pump_top.y() + 1.2),
+                (pump_in.x() - 3.0, manifold_y),
+                (tank_outlets[-1].x(), manifold_y),
             ],
             self.milk_pen,
         )
 
         pasteurizer_in = self.pasteurizer.inlet_port()
 
-        # Start slightly INSIDE the real left nozzle.
-        # Because the pipe is behind the PNG, the hidden overlap removes
-        # the white gap and the visible line ends exactly at the metal fitting.
+        # 01-PM1 is now the actual elbow:
+        # discharge leaves the TOP nozzle, rises vertically,
+        # then turns right directly into the pasteurizer inlet.
         self.add_pipe(
             [
-                (pump_left.x() + 3.2, pump_left.y()),
-                (24, pump_left.y()),
-                (24, pasteurizer_in.y()),
+                (pump_out.x(), pump_out.y() + 1.2),
+                (pump_out.x(), pasteurizer_in.y()),
                 (pasteurizer_in.x(), pasteurizer_in.y()),
             ],
             self.milk_pen,
@@ -580,8 +619,8 @@ class EquipmentScene(QGraphicsScene):
         self.add_pipe(
             [
                 (skim_out.x(), skim_out.y()),
-                (450, skim_out.y()),
-                (450, skim_left.y()),
+                (430, skim_out.y()),
+                (430, skim_left.y()),
                 (skim_left.x(), skim_left.y()),
             ],
             self.milk_pen,
