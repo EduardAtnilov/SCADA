@@ -105,7 +105,7 @@ class EquipmentScene(QGraphicsScene):
         self.milk_pen = self._make_pipe_pen("#1769d2", 3.0)
         self.cream_pen = self._make_pipe_pen("#f18a00", 3.0)
         self.product_pen = self._make_pipe_pen("#14913c", 3.0)
-        self.whey_pen = self._make_pipe_pen("#7c3db4", 2.4, Qt.PenStyle.DashLine)
+        self.whey_pen = self._make_pipe_pen("#b8860b", 2.4, Qt.PenStyle.DashLine)
 
         self.text_font = QFont()
         self.text_font.setPointSizeF(8.3)
@@ -409,17 +409,34 @@ class EquipmentScene(QGraphicsScene):
             for tank in self.storage_tanks
         ]
 
-        # Keep the existing collector level.
-        manifold_y = (
+        # Overview follows the same storage routing shape as the
+        # detailed Milk Storage page, but without valves / CIP graphics:
+        #
+        # TK1A + TK1B -> upper collector -> 01-PM1
+        # TK1C + TK1D -> lower collector -> vertical bypass ->
+        #                upper collector -> 01-PM1
+        upper_collector_y = (
             max(outlet.y() for outlet in tank_outlets)
             + 26.0
         )
+        lower_collector_y = upper_collector_y + 28.0
 
-        for outlet in tank_outlets:
+        # A / B section: direct upper collector.
+        for outlet in tank_outlets[:2]:
             self.add_pipe(
                 [
                     (outlet.x(), outlet.y()),
-                    (outlet.x(), manifold_y),
+                    (outlet.x(), upper_collector_y),
+                ],
+                self.milk_pen,
+            )
+
+        # C / D section: lower collector.
+        for outlet in tank_outlets[2:]:
+            self.add_pipe(
+                [
+                    (outlet.x(), outlet.y()),
+                    (outlet.x(), lower_collector_y),
                 ],
                 self.milk_pen,
             )
@@ -434,21 +451,32 @@ class EquipmentScene(QGraphicsScene):
             storage_pump._storage_discharge_local
         )
 
-        # Four storage tanks -> common horizontal collector ->
-        # RIGHT suction nozzle of the mirrored 01-PM1.
+        # Upper A/B collector goes straight into the pump suction.
         self.add_pipe(
             [
-                (pump_in.x() - 3.0, manifold_y),
-                (tank_outlets[-1].x(), manifold_y),
+                (pump_in.x() - 3.0, upper_collector_y),
+                (tank_outlets[1].x(), upper_collector_y),
+            ],
+            self.milk_pen,
+        )
+
+        # C/D collector runs lower, then rises near the pump and joins
+        # the same suction line. This mirrors the detailed page geometry.
+        bypass_join_x = tank_outlets[0].x() - 42.0
+
+        self.add_pipe(
+            [
+                (bypass_join_x, upper_collector_y),
+                (bypass_join_x, lower_collector_y),
+                (tank_outlets[-1].x(), lower_collector_y),
             ],
             self.milk_pen,
         )
 
         pasteurizer_in = self.pasteurizer.inlet_port()
 
-        # 01-PM1 is now the actual elbow:
-        # discharge leaves the TOP nozzle, rises vertically,
-        # then turns right directly into the pasteurizer inlet.
+        # 01-PM1 discharge remains unchanged:
+        # top outlet -> vertical riser -> pasteurizer.
         self.add_pipe(
             [
                 (pump_out.x(), pump_out.y() + 1.2),
@@ -963,4 +991,3 @@ class EquipmentScene(QGraphicsScene):
         whey_out = self.press.whey_out_port()
         end_y = min(self.SCENE_HEIGHT - 85, whey_out.y() + 95)
         self.add_pipe([(whey_out.x(), whey_out.y()), (whey_out.x(), end_y)], self.whey_pen, arrow=True)
-        self.add_label("Whey", whey_out.x() - 16, end_y + 8, self.small_font, "#6d2ca0")

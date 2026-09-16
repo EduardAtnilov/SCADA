@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -30,20 +30,47 @@ from PySide6.QtWidgets import (
 
 from equipment.valve import Valve
 from ui.components.valve_item import ValveItem
+from ui.components.agitator_item import AgitatorItem
 
 
+# Valve tag convention for process area 01 — Milk Storage:
+#   01-V1xx    top supply / reception header
+#   01-V2xx    tank inlet valves
+#   01-V3xx    tank outlet valves
+#   01-V4xx    lower product header
+#   01-VC1xx  CIP supply valves on the top header
+#   01-VC4xx  CIP return valves on the lower header
+#
+# C is placed immediately after V so CIP/cleaning valves are
+# visually distinct from ordinary process valves.
 STORAGE_VALVE_IDS = (
-    "V-001",
-    "V-002",
-    "V-101",
-    "V-102",
-    "V-103",
-    "V-104",
-    "V-111",
-    "V-112",
-    "V-113",
-    "V-114",
-    "V-202",
+    # Level 1 — top header
+    "01-VC101",
+    "01-V101",
+    "01-V102",
+    "01-V103",
+    "01-V104",
+    "01-VC102",
+
+    # Level 2 — tank inlets
+    "01-V201",
+    "01-V202",
+    "01-V203",
+    "01-V204",
+
+    # Level 3 — tank outlets
+    "01-V301",
+    "01-V302",
+    "01-V303",
+    "01-V304",
+
+    # Level 4 — lower product / CIP return
+    "01-V401",
+    "01-V402",
+    "01-VC401",
+    "01-V403",
+    "01-V404",
+    "01-VC402",
 )
 
 
@@ -51,18 +78,30 @@ def _storage_valve_description(
     valve_id: str,
 ) -> str:
     descriptions = {
-        "V-001": "Milk reception route valve",
-        "V-002": "CIP supply route valve",
-        "V-202": "CIP return route valve",
+        # Level 1 — top header
+        "01-VC101": "Left CIP supply valve",
+        "01-V101": "Upper header section valve A-B",
+        "01-V102": "Upper header left milk-reception isolation valve",
+        "01-V103": "Upper header right milk-reception isolation valve",
+        "01-V104": "Upper header section valve C-D",
+        "01-VC102": "Right CIP supply valve",
+
+        # Level 4 — lower product / CIP return
+        "01-V401": "Section A product valve to transfer pump",
+        "01-V402": "Section A midpoint isolation valve",
+        "01-VC401": "Section A CIP return valve",
+        "01-V403": "Section B product valve toward transfer pump",
+        "01-V404": "Section B midpoint isolation valve",
+        "01-VC402": "Section B CIP return valve",
     }
 
     if valve_id in descriptions:
         return descriptions[valve_id]
 
-    if valve_id.startswith("V-10"):
+    if valve_id.startswith("01-V20"):
         return "Tank supply mixproof valve"
 
-    if valve_id.startswith("V-11"):
+    if valve_id.startswith("01-V30"):
         return "Tank product / CIP return mixproof valve"
 
     return "Process routing valve"
@@ -72,12 +111,13 @@ def _storage_valve_orientation(
     valve_id: str,
 ) -> str:
     if (
-        valve_id.startswith("V-10")
-        or valve_id.startswith("V-11")
+        valve_id.startswith("01-V20")
+        or valve_id.startswith("01-V30")
     ):
         return "vertical"
 
     return "horizontal"
+
 
 
 # ============================================================
@@ -256,6 +296,82 @@ class ModeSelector(QWidget):
         )
 
 
+class AgitatorSwitch(QWidget):
+    running_requested = Signal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(
+            0,
+            0,
+            0,
+            0,
+        )
+        root.setSpacing(12)
+
+        self.on_button = QRadioButton(
+            "ON"
+        )
+        self.off_button = QRadioButton(
+            "OFF"
+        )
+
+        group = QButtonGroup(self)
+        group.addButton(
+            self.on_button
+        )
+        group.addButton(
+            self.off_button
+        )
+
+        self.off_button.setChecked(
+            True
+        )
+
+        # One signal is enough: True when ON becomes selected,
+        # False when the selection moves back to OFF.
+        self.on_button.toggled.connect(
+            self.running_requested.emit
+        )
+
+        root.addWidget(
+            self.on_button
+        )
+        root.addWidget(
+            self.off_button
+        )
+        root.addStretch()
+
+    def set_running(
+        self,
+        running: bool,
+    ) -> None:
+        self.on_button.blockSignals(
+            True
+        )
+        self.off_button.blockSignals(
+            True
+        )
+
+        if running:
+            self.on_button.setChecked(
+                True
+            )
+        else:
+            self.off_button.setChecked(
+                True
+            )
+
+        self.on_button.blockSignals(
+            False
+        )
+        self.off_button.blockSignals(
+            False
+        )
+
+
 class DetailSection(QFrame):
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
@@ -396,6 +512,7 @@ class PumpPopup(QFrame):
 
 class TankDetailPanel(QFrame):
     control_mode_requested = Signal(str, str)
+    agitator_requested = Signal(str, bool)
     cip_requested = Signal(str)
 
     def __init__(
@@ -491,16 +608,16 @@ class TankDetailPanel(QFrame):
 
         agitator = DetailSection("Agitator")
 
-        self.agitator_mode = ModeSelector()
-        self.agitator_mode.mode_requested.connect(
-            lambda mode:
-            self.control_mode_requested.emit(
-                f"{self.selected_tank_id}:AGITATOR",
-                mode,
+        self.agitator_control = AgitatorSwitch()
+        self.agitator_control.running_requested.connect(
+            lambda running:
+            self.agitator_requested.emit(
+                self.selected_tank_id,
+                running,
             )
         )
         agitator.root.addWidget(
-            self.agitator_mode
+            self.agitator_control
         )
 
         agitator_grid = QGridLayout()
@@ -692,12 +809,20 @@ class TankDetailPanel(QFrame):
         )
 
         if agitator is None:
-            self.agitator_state.setText("—")
+            self.agitator_state.setText(
+                "—"
+            )
+            self.agitator_control.set_running(
+                False
+            )
         else:
             self.agitator_state.setText(
-                "RUNNING"
+                "ON"
                 if agitator
                 else "OFF"
+            )
+            self.agitator_control.set_running(
+                bool(agitator)
             )
 
         self.agitator_speed.setText(
@@ -837,7 +962,7 @@ class MilkStorageCanvas(QWidget):
     # these are the only process-connection offsets to tune.
     TANK_MAX_W = 126.0
     TANK_MAX_H = 238.0
-    TANK_TOP = 165.0
+    TANK_TOP = 213.0
 
     PRODUCT_PORT_Y_RATIO = 0.80
     PRODUCT_PORT_X_OFFSET = 0.0
@@ -862,6 +987,40 @@ class MilkStorageCanvas(QWidget):
         self.tank_pixmap = _trim_visual_pixmap(
             QPixmap(str(tank_image_path))
         )
+
+        # Subtle selection halo: same alpha silhouette as the tank PNG,
+        # slightly enlarged behind the selected tank. No rectangular frame.
+        self.tank_selection_pixmap = QPixmap()
+
+        if not self.tank_pixmap.isNull():
+            self.tank_selection_pixmap = QPixmap(
+                self.tank_pixmap.size()
+            )
+            self.tank_selection_pixmap.fill(
+                Qt.GlobalColor.transparent
+            )
+
+            selection_painter = QPainter(
+                self.tank_selection_pixmap
+            )
+            selection_painter.drawPixmap(
+                0,
+                0,
+                self.tank_pixmap,
+            )
+            selection_painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceIn
+            )
+            selection_painter.fillRect(
+                self.tank_selection_pixmap.rect(),
+                QColor(
+                    self.BLUE.red(),
+                    self.BLUE.green(),
+                    self.BLUE.blue(),
+                    72,
+                ),
+            )
+            selection_painter.end()
 
         raw_pump = _trim_visual_pixmap(
             QPixmap(str(pump_image_path))
@@ -907,6 +1066,7 @@ class MilkStorageCanvas(QWidget):
             str,
             QRectF,
         ] = {}
+        self.selected_tank_id = "01-TK1A"
         self._pump_rect = QRectF()
 
         self._valve_items: dict[
@@ -942,6 +1102,26 @@ class MilkStorageCanvas(QWidget):
             dict[str, Any],
         ] = {}
 
+        # Visual agitators are reusable graphics only.
+        # Process logic will later drive them through agitator_running.
+        self._agitators: dict[
+            str,
+            AgitatorItem,
+        ] = {
+            tank_id: AgitatorItem()
+            for tank_id in self.TANK_IDS
+        }
+
+        self._agitator_timer = QTimer(
+            self
+        )
+        self._agitator_timer.setInterval(
+            70
+        )
+        self._agitator_timer.timeout.connect(
+            self._advance_agitators
+        )
+
     # --------------------------------------------------------
     # Public update API
     # --------------------------------------------------------
@@ -963,7 +1143,84 @@ class MilkStorageCanvas(QWidget):
             tank_id
         ] = current
 
+        if (
+            "agitator_running" in data
+            and data.get(
+                "agitator_running"
+            ) is not None
+        ):
+            self._agitators[
+                tank_id
+            ].set_running(
+                bool(
+                    data.get(
+                        "agitator_running"
+                    )
+                )
+            )
+            self._sync_agitator_timer()
+
         self.update()
+
+    def set_agitator_running(
+        self,
+        tank_id: str,
+        running: bool,
+    ) -> None:
+        agitator = self._agitators.get(
+            tank_id
+        )
+
+        if agitator is None:
+            return
+
+        agitator.set_running(
+            running
+        )
+
+        current = dict(
+            self.tank_data.get(
+                tank_id,
+                {},
+            )
+        )
+        current[
+            "agitator_running"
+        ] = bool(running)
+        self.tank_data[
+            tank_id
+        ] = current
+
+        self._sync_agitator_timer()
+        self.update()
+
+    def _sync_agitator_timer(
+        self,
+    ) -> None:
+        any_running = any(
+            item.running
+            for item in self._agitators.values()
+        )
+
+        if any_running:
+            if not self._agitator_timer.isActive():
+                self._agitator_timer.start()
+        else:
+            self._agitator_timer.stop()
+
+    def _advance_agitators(
+        self,
+    ) -> None:
+        changed = False
+
+        for item in self._agitators.values():
+            changed = (
+                item.advance()
+                or changed
+            )
+
+        if changed:
+            self.update()
 
     def set_valve_state(
         self,
@@ -1157,7 +1414,7 @@ class MilkStorageCanvas(QWidget):
         # Milk Reception and CIP Station feed the SAME header
         # through routing valves. There is no parallel CIP pipe.
         # ----------------------------------------------------
-        supply_y = 72.0
+        supply_y = 120.0
 
         painter.setPen(
             physical_pen
@@ -1167,17 +1424,20 @@ class MilkStorageCanvas(QWidget):
             QPointF(1450, supply_y),
         )
 
-        # Milk source route on LEFT
-        painter.setPen(self.BLUE)
+        # ----------------------------------------------------
+        # LEFT CIP inlet.
+        # ----------------------------------------------------
+        painter.setPen(self.PURPLE)
         painter.setFont(title_font)
         painter.drawText(
             QRectF(
-                20,
-                31,
-                175,
+                130,
+                59,
+                150,
                 24,
             ),
-            "MILK RECEPTION",
+            Qt.AlignmentFlag.AlignCenter,
+            "CIP STATION",
         )
 
         self._draw_arrow(
@@ -1190,7 +1450,7 @@ class MilkStorageCanvas(QWidget):
                 190,
                 supply_y,
             ),
-            self.BLUE,
+            self.PURPLE,
         )
 
         painter.setPen(
@@ -1202,7 +1462,7 @@ class MilkStorageCanvas(QWidget):
         )
 
         self._valve_items[
-            "V-001"
+            "01-VC101"
         ].draw(
             painter,
             QPointF(
@@ -1211,28 +1471,97 @@ class MilkStorageCanvas(QWidget):
             ),
         )
 
-        # CIP source route on RIGHT into the same header
+        painter.setPen(self.DARK)
+        painter.setFont(tag_font)
+        painter.drawText(
+            QRectF(
+                177,
+                supply_y + 10,
+                70,
+                18,
+            ),
+            Qt.AlignmentFlag.AlignCenter,
+            "01-VC101",
+        )
+
+        # ----------------------------------------------------
+        # CENTER milk reception inlet between TK2 and TK3.
+        # No separate inlet valve is shown here: routing to the
+        # left/right storage sections is handled by V-007 / V-005.
+        #
+        # Flow direction is shown by an arrow ABOVE the branch;
+        # after the arrow, the pipe continues vertically and then
+        # joins the horizontal supply header.
+        # ----------------------------------------------------
+        milk_inlet_x = 810.0
+
+        painter.setPen(self.BLUE)
+        painter.setFont(title_font)
+        painter.drawText(
+            QRectF(
+                milk_inlet_x + 18.0,
+                43,
+                150,
+                24,
+            ),
+            "MILK RECEPTION",
+        )
+
+        # Match the CIP arrows: 35 px arrow length.
+        # Keep only a short straight pipe segment after the arrow
+        # before it joins the horizontal supply header.
+        self._draw_down_vertical_arrow(
+            painter,
+            QPointF(
+                milk_inlet_x,
+                61,
+            ),
+            QPointF(
+                milk_inlet_x,
+                96,
+            ),
+            self.BLUE,
+        )
+
+        # Pipe continues AFTER the arrow down to the header.
+        painter.setPen(
+            physical_pen
+        )
+        painter.drawLine(
+            QPointF(
+                milk_inlet_x,
+                96,
+            ),
+            QPointF(
+                milk_inlet_x,
+                supply_y,
+            ),
+        )
+
+        # ----------------------------------------------------
+        # RIGHT CIP inlet.
+        # ----------------------------------------------------
         painter.setPen(self.PURPLE)
         painter.setFont(title_font)
         painter.drawText(
             QRectF(
-                1370,
-                31,
+                1415,
+                59,
                 150,
                 24,
             ),
-            Qt.AlignmentFlag.AlignRight,
+            Qt.AlignmentFlag.AlignCenter,
             "CIP STATION",
         )
 
         self._draw_arrow(
             painter,
             QPointF(
-                1545,
+                1540,
                 supply_y,
             ),
             QPointF(
-                1507,
+                1505,
                 supply_y,
             ),
             self.PURPLE,
@@ -1247,7 +1576,7 @@ class MilkStorageCanvas(QWidget):
         )
 
         self._valve_items[
-            "V-002"
+            "01-VC102"
         ].draw(
             painter,
             QPointF(
@@ -1255,6 +1584,54 @@ class MilkStorageCanvas(QWidget):
                 supply_y,
             ),
         )
+
+        painter.setPen(self.DARK)
+        painter.setFont(tag_font)
+        painter.drawText(
+            QRectF(
+                1455,
+                supply_y + 10,
+                70,
+                18,
+            ),
+            Qt.AlignmentFlag.AlignCenter,
+            "01-VC102",
+        )
+
+        # ----------------------------------------------------
+        # Section valves in the common supply header.
+        # One valve is placed between each pair of tank branches.
+        # ----------------------------------------------------
+        section_valves = (
+            ("01-V101", 490.0),
+            ("01-V102", 760.0),
+            ("01-V103", 860.0),
+            ("01-V104", 1130.0),
+        )
+
+        for valve_id, valve_x in section_valves:
+            self._valve_items[
+                valve_id
+            ].draw(
+                painter,
+                QPointF(
+                    valve_x,
+                    supply_y,
+                ),
+            )
+
+            painter.setPen(self.DARK)
+            painter.setFont(tag_font)
+            painter.drawText(
+                QRectF(
+                    valve_x - 38,
+                    supply_y + 9,
+                    76,
+                    18,
+                ),
+                Qt.AlignmentFlag.AlignCenter,
+                valve_id,
+            )
 
         # Optional active CIP highlight OVER the same pipe.
         if self.supply_media == "CIP":
@@ -1266,32 +1643,126 @@ class MilkStorageCanvas(QWidget):
                 QPointF(1450, supply_y),
             )
 
-        painter.setPen(self.MUTED)
-        painter.setFont(small_font)
-        painter.drawText(
-            QRectF(
-                245,
-                supply_y + 8,
-                220,
-                18,
-            ),
-            "Common supply header: milk / CIP",
-        )
-
         # ----------------------------------------------------
         # ONE physical product / return header.
         #
         # Product to pasteurization and CIP return use the SAME
         # lower header. Routing valves select the destination.
         # ----------------------------------------------------
-        return_y = 488.0
+        return_y = 536.0
+
+        painter.setPen(
+            physical_pen
+        )
+
+        # Lower product header is split between TK1B and TK1C.
+        # Left section: pump side through TK1A / TK1B.
+        painter.drawLine(
+            QPointF(245, return_y),
+            QPointF(680, return_y),
+        )
+
+        # Section A midpoint valve between TK1A and TK1B.
+        section_a_mid_valve_x = 520.0
+
+        self._valve_items[
+            "01-V402"
+        ].draw(
+            painter,
+            QPointF(
+                section_a_mid_valve_x,
+                return_y,
+            ),
+        )
+
+        painter.setPen(self.DARK)
+        painter.setFont(tag_font)
+        painter.drawText(
+            QRectF(
+                section_a_mid_valve_x - 38,
+                return_y + 10,
+                76,
+                18,
+            ),
+            Qt.AlignmentFlag.AlignCenter,
+            "01-V402",
+        )
+
+        # CIP RETURN for the A/B section.
+        # This is a separate outlet from the A/B header and does not
+        # reconnect the intentionally split B-C product line.
+        section_a_cip_valve_x = 788.0
 
         painter.setPen(
             physical_pen
         )
         painter.drawLine(
-            QPointF(245, return_y),
-            QPointF(1450, return_y),
+            QPointF(
+                680,
+                return_y,
+            ),
+            QPointF(
+                section_a_cip_valve_x + 11.0,
+                return_y,
+            ),
+        )
+
+        # Draw the valve AFTER the pipe so the symbol sits on top
+        # and hides the blue line inside the valve body.
+        self._valve_items[
+            "01-VC401"
+        ].draw(
+            painter,
+            QPointF(
+                section_a_cip_valve_x,
+                return_y,
+            ),
+        )
+
+        painter.setPen(self.DARK)
+        painter.setFont(tag_font)
+        painter.drawText(
+            QRectF(
+                section_a_cip_valve_x - 35.0,
+                return_y - 28.0,
+                70,
+                18,
+            ),
+            Qt.AlignmentFlag.AlignCenter,
+            "01-VC401",
+        )
+
+        self._draw_arrow(
+            painter,
+            QPointF(
+                section_a_cip_valve_x + 13.0,
+                return_y,
+            ),
+            QPointF(
+                section_a_cip_valve_x + 58.0,
+                return_y,
+            ),
+            self.PURPLE,
+        )
+
+        painter.setPen(self.PURPLE)
+        painter.setFont(title_font)
+        painter.drawText(
+            QRectF(
+                section_a_cip_valve_x - 18.0,
+                return_y + 18.0,
+                120,
+                20,
+            ),
+            "CIP RETURN",
+        )
+
+        # Right section: TK1C / TK1D to CIP return side.
+        # Keep it on the same lower level as the bypass line.
+        right_section_y = return_y + 42.0
+        painter.drawLine(
+            QPointF(1000, right_section_y),
+            QPointF(1439, right_section_y),
         )
 
         if self.return_media == "CIP":
@@ -1300,21 +1771,127 @@ class MilkStorageCanvas(QWidget):
             )
             painter.drawLine(
                 QPointF(245, return_y),
-                QPointF(1450, return_y),
+                QPointF(680, return_y),
+            )
+            painter.drawLine(
+                QPointF(1000, right_section_y),
+                QPointF(1439, right_section_y),
             )
 
-        painter.setPen(self.MUTED)
-        painter.setFont(small_font)
+        # ----------------------------------------------------
+        # Right C/D section and bypass are ONE physical line.
+        # It stays on the lower level and runs left to the
+        # connection point between 01-PM1 and TK1A.
+        # ----------------------------------------------------
+        bypass_join_x = 270.0
+        bypass_y = right_section_y
+
+        painter.setPen(
+            physical_pen
+        )
+
+        painter.drawLine(
+            QPointF(
+                1439,
+                bypass_y,
+            ),
+            QPointF(
+                bypass_join_x,
+                bypass_y,
+            ),
+        )
+
+        painter.drawLine(
+            QPointF(
+                bypass_join_x,
+                bypass_y,
+            ),
+            QPointF(
+                bypass_join_x,
+                return_y,
+            ),
+        )
+
+        # Lower product-routing valves.
+        #
+        # V-203 sits on the long C/D header on the pump side.
+        section_b_inlet_valve_x = 930.0
+
+        self._valve_items[
+            "01-V403"
+        ].draw(
+            painter,
+            QPointF(
+                section_b_inlet_valve_x,
+                bypass_y,
+            ),
+        )
+
+        painter.setPen(self.DARK)
+        painter.setFont(tag_font)
         painter.drawText(
             QRectF(
-                1080,
-                return_y + 9,
-                300,
+                section_b_inlet_valve_x - 38,
+                bypass_y + 10,
+                76,
                 18,
             ),
-            Qt.AlignmentFlag.AlignRight,
-            "Common return header: product / CIP return",
+            Qt.AlignmentFlag.AlignCenter,
+            "01-V403",
         )
+
+        # V-204 is placed between TK1C and TK1D.
+        section_b_mid_valve_x = 1160.0
+
+        self._valve_items[
+            "01-V404"
+        ].draw(
+            painter,
+            QPointF(
+                section_b_mid_valve_x,
+                bypass_y,
+            ),
+        )
+
+        painter.setPen(self.DARK)
+        painter.setFont(tag_font)
+        painter.drawText(
+            QRectF(
+                section_b_mid_valve_x - 38,
+                bypass_y + 10,
+                76,
+                18,
+            ),
+            Qt.AlignmentFlag.AlignCenter,
+            "01-V404",
+        )
+
+        # V-205 sits between 01-PM1 and TK1A, closer to TK1A.
+        section_a_valve_x = 330.0
+
+        self._valve_items[
+            "01-V401"
+        ].draw(
+            painter,
+            QPointF(
+                section_a_valve_x,
+                return_y,
+            ),
+        )
+
+        painter.setPen(self.DARK)
+        painter.setFont(tag_font)
+        painter.drawText(
+            QRectF(
+                section_a_valve_x - 38,
+                return_y + 10,
+                76,
+                18,
+            ),
+            Qt.AlignmentFlag.AlignCenter,
+            "01-V401",
+        )
+
 
         # ----------------------------------------------------
         # Tank geometry and EXACT graphic-relative ports
@@ -1392,11 +1969,17 @@ class MilkStorageCanvas(QWidget):
                 supply_port,
             )
 
+            outlet_header_y = (
+                right_section_y
+                if tank_id in ("01-TK1C", "01-TK1D")
+                else return_y
+            )
+
             painter.drawLine(
                 product_port,
                 QPointF(
                     product_port.x(),
-                    return_y,
+                    outlet_header_y,
                 ),
             )
 
@@ -1420,7 +2003,7 @@ class MilkStorageCanvas(QWidget):
                     product_port,
                     QPointF(
                         product_port.x(),
-                        return_y,
+                        outlet_header_y,
                     ),
                 )
 
@@ -1447,7 +2030,11 @@ class MilkStorageCanvas(QWidget):
 
             x = tank_rect.center().x()
 
-            painter.setPen(self.DARK)
+            painter.setPen(
+                self.BLUE
+                if tank_id == self.selected_tank_id
+                else self.DARK
+            )
             painter.setFont(title_font)
             painter.drawText(
                 QRectF(
@@ -1465,6 +2052,23 @@ class MilkStorageCanvas(QWidget):
             ] = tank_rect
 
             if not self.tank_pixmap.isNull():
+                if (
+                    tank_id == self.selected_tank_id
+                    and not self.tank_selection_pixmap.isNull()
+                ):
+                    painter.drawPixmap(
+                        tank_rect.adjusted(
+                            -2.5,
+                            -2.5,
+                            2.5,
+                            2.5,
+                        ),
+                        self.tank_selection_pixmap,
+                        QRectF(
+                            self.tank_selection_pixmap.rect()
+                        ),
+                    )
+
                 painter.drawPixmap(
                     tank_rect,
                     self.tank_pixmap,
@@ -1488,12 +2092,21 @@ class MilkStorageCanvas(QWidget):
                     8,
                 )
 
+            # Small cutaway in the shell showing the internal agitator.
+            # OFF = stationary; ON = simple constant rotation.
+            self._agitators[
+                tank_id
+            ].draw(
+                painter,
+                tank_rect,
+            )
+
             # Tank inlet mixproof valve.
-            inlet_id = f"V-10{index}"
+            inlet_id = f"01-V20{index}"
 
             inlet_center = QPointF(
                 supply_port.x(),
-                116,
+                supply_y + 44.0,
             )
 
             self._valve_items[
@@ -1527,11 +2140,17 @@ class MilkStorageCanvas(QWidget):
             )
 
             # Tank outlet / return mixproof valve.
-            outlet_id = f"V-11{index}"
+            outlet_id = f"01-V30{index}"
+
+            outlet_header_y = (
+                right_section_y
+                if tank_id in ("01-TK1C", "01-TK1D")
+                else return_y
+            )
 
             outlet_center = QPointF(
                 product_port.x(),
-                return_y - 32,
+                outlet_header_y - 32,
             )
 
             self._valve_items[
@@ -1814,39 +2433,39 @@ class MilkStorageCanvas(QWidget):
         # No parallel lower CIP line.
         # ----------------------------------------------------
         cip_return_valve = QPointF(
-            1488,
-            return_y,
+            1428,
+            right_section_y,
         )
 
         self._valve_items[
-            "V-202"
+            "01-VC402"
         ].draw(
             painter,
             cip_return_valve,
         )
 
-        painter.setPen(
-            physical_pen
-        )
-        painter.drawLine(
-            QPointF(
-                1450,
-                return_y,
+        painter.setPen(self.DARK)
+        painter.setFont(tag_font)
+        painter.drawText(
+            QRectF(
+                cip_return_valve.x() - 35.0,
+                cip_return_valve.y() - 28.0,
+                70,
+                18,
             ),
-            QPointF(
-                1474,
-                return_y,
-            ),
+            Qt.AlignmentFlag.AlignCenter,
+            "01-VC402",
         )
+
         self._draw_arrow(
             painter,
             QPointF(
-                1503,
-                return_y,
+                1441,
+                right_section_y,
             ),
             QPointF(
-                1548,
-                return_y,
+                1486,
+                right_section_y,
             ),
             self.PURPLE,
         )
@@ -1859,8 +2478,8 @@ class MilkStorageCanvas(QWidget):
         )
         painter.drawText(
             QRectF(
-                1430,
-                return_y + 18,
+                1370,
+                right_section_y + 18,
                 120,
                 20,
             ),
@@ -1930,6 +2549,56 @@ class MilkStorageCanvas(QWidget):
 
 
     @staticmethod
+    def _draw_down_vertical_arrow(
+        painter: QPainter,
+        start: QPointF,
+        end: QPointF,
+        color: QColor,
+    ) -> None:
+        painter.setPen(
+            QPen(
+                color,
+                5,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.SquareCap,
+                Qt.PenJoinStyle.MiterJoin,
+            )
+        )
+        painter.setBrush(
+            color
+        )
+
+        arrow_base = QPointF(
+            end.x(),
+            end.y() - 10.0,
+        )
+
+        painter.drawLine(
+            start,
+            arrow_base,
+        )
+
+        triangle = QPolygonF([
+            QPointF(
+                end.x(),
+                end.y(),
+            ),
+            QPointF(
+                end.x() - 6,
+                end.y() - 10,
+            ),
+            QPointF(
+                end.x() + 6,
+                end.y() - 10,
+            ),
+        ])
+
+        painter.drawPolygon(
+            triangle
+        )
+
+
+    @staticmethod
     def _draw_vertical_arrow(
         painter: QPainter,
         start: QPointF,
@@ -1980,6 +2649,19 @@ class MilkStorageCanvas(QWidget):
         painter.drawPolygon(
             triangle
         )
+
+    def set_selected_tank(
+        self,
+        tank_id: str,
+    ) -> None:
+        if tank_id not in self.TANK_IDS:
+            return
+
+        if self.selected_tank_id == tank_id:
+            return
+
+        self.selected_tank_id = tank_id
+        self.update()
 
     # --------------------------------------------------------
     # Click handling
@@ -2032,6 +2714,27 @@ class MilkStorageCanvas(QWidget):
                 return
 
         super().mousePressEvent(
+            event
+        )
+
+    def mouseMoveEvent(self, event):
+        design_point = self._to_design(
+            event.position()
+        )
+
+        over_tank = any(
+            rect.contains(design_point)
+            for rect in self._tank_rects.values()
+        )
+
+        if over_tank:
+            self.setCursor(
+                Qt.CursorShape.PointingHandCursor
+            )
+        else:
+            self.unsetCursor()
+
+        super().mouseMoveEvent(
             event
         )
 
@@ -2224,6 +2927,13 @@ class MilkStoragePage(QWidget):
                 font-size: 9px;
             }
 
+            QRadioButton {
+                color: #334155;
+                background: transparent;
+                font-size: 10px;
+                spacing: 5px;
+            }
+
             QPushButton {
                 min-height: 24px;
                 padding: 2px 9px;
@@ -2351,6 +3061,9 @@ class MilkStoragePage(QWidget):
         self.detail_panel.control_mode_requested.connect(
             self._mode_requested
         )
+        self.detail_panel.agitator_requested.connect(
+            self.set_agitator_running
+        )
         self.detail_panel.cip_requested.connect(
             self.cip_requested
         )
@@ -2367,6 +3080,10 @@ class MilkStoragePage(QWidget):
         self,
         tank_id: str,
     ) -> None:
+        self.canvas.set_selected_tank(
+            tank_id
+        )
+
         self.detail_panel.select_tank(
             tank_id,
             self._tank_data.get(
@@ -2597,6 +3314,47 @@ class MilkStoragePage(QWidget):
                 normalized
             )
 
+    def set_agitator_running(
+        self,
+        tank_id: str,
+        running: bool,
+    ) -> None:
+        """
+        Visual state hook for the agitator.
+
+        For now this can be used for simple animation testing.
+        Later the simulator/controller can call the same method or provide
+        agitator_running through set_tank_data().
+        """
+        if tank_id not in self.TANK_IDS:
+            return
+
+        current = dict(
+            self._tank_data.get(
+                tank_id,
+                {},
+            )
+        )
+        current[
+            "agitator_running"
+        ] = bool(running)
+        self._tank_data[
+            tank_id
+        ] = current
+
+        self.canvas.set_agitator_running(
+            tank_id,
+            running,
+        )
+
+        if (
+            tank_id
+            == self.detail_panel.selected_tank_id
+        ):
+            self.detail_panel.update_tank_data(
+                current
+            )
+
     def set_valve_state(
         self,
         valve_id: str,
@@ -2679,11 +3437,11 @@ class MilkStoragePage(QWidget):
         )
 
         inlet = self._valves.get(
-            f"V-10{index}"
+            f"01-V20{index}"
         )
 
         outlet = self._valves.get(
-            f"V-11{index}"
+            f"01-V30{index}"
         )
 
         pump = self._pump_data.get(
@@ -2715,10 +3473,10 @@ class MilkStoragePage(QWidget):
     def _tank_for_valve(
         valve_id: str,
     ) -> str | None:
-        # Only tank valves V-101..104 / V-111..114 map to a tank.
+        # Only tank valves 01-V201..104 / 01-V301..114 map to a tank.
         if not (
-            valve_id.startswith("V-10")
-            or valve_id.startswith("V-11")
+            valve_id.startswith("01-V20")
+            or valve_id.startswith("01-V30")
         ):
             return None
 

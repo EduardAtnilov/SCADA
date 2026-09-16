@@ -129,9 +129,15 @@ class InfoPanel(QFrame):
         )
         legend_layout.addWidget(
             LegendRow(
-                "#7c3db4",
+                "#b8860b",
                 "Whey",
                 dashed=True,
+            )
+        )
+        legend_layout.addWidget(
+            LegendRow(
+                "#8147c6",
+                "CIP",
             )
         )
         legend_layout.addStretch()
@@ -202,7 +208,7 @@ class InfoPanel(QFrame):
             events,
         ):
             timestamp = event["time"].strftime(
-                "%d.%m %H:%M:%S"
+                "%H:%M:%S"
             )
             category = event["category"]
             message = event["message"]
