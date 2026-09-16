@@ -28,6 +28,58 @@ from PySide6.QtWidgets import (
 )
 
 
+from equipment.valve import Valve
+from ui.components.valve_item import ValveItem
+
+
+STORAGE_VALVE_IDS = (
+    "V-001",
+    "V-002",
+    "V-101",
+    "V-102",
+    "V-103",
+    "V-104",
+    "V-111",
+    "V-112",
+    "V-113",
+    "V-114",
+    "V-202",
+)
+
+
+def _storage_valve_description(
+    valve_id: str,
+) -> str:
+    descriptions = {
+        "V-001": "Milk reception route valve",
+        "V-002": "CIP supply route valve",
+        "V-202": "CIP return route valve",
+    }
+
+    if valve_id in descriptions:
+        return descriptions[valve_id]
+
+    if valve_id.startswith("V-10"):
+        return "Tank supply mixproof valve"
+
+    if valve_id.startswith("V-11"):
+        return "Tank product / CIP return mixproof valve"
+
+    return "Process routing valve"
+
+
+def _storage_valve_orientation(
+    valve_id: str,
+) -> str:
+    if (
+        valve_id.startswith("V-10")
+        or valve_id.startswith("V-11")
+    ):
+        return "vertical"
+
+    return "horizontal"
+
+
 # ============================================================
 # Image helpers
 # ============================================================
@@ -221,122 +273,6 @@ class DetailSection(QFrame):
 # ============================================================
 # Click-on-symbol control popups
 # ============================================================
-
-class ValvePopup(QFrame):
-    command_requested = Signal(str, str)
-    mode_requested = Signal(str, str)
-
-    def __init__(self, parent=None):
-        super().__init__(
-            parent,
-            Qt.WindowType.Popup,
-        )
-
-        self.setObjectName("ValvePopup")
-        self.valve_id: str | None = None
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(10, 8, 10, 8)
-        root.setSpacing(6)
-
-        self.title = QLabel("Valve")
-        self.title.setObjectName("PopupTitle")
-        root.addWidget(self.title)
-
-        self.state = QLabel("State: —")
-        self.command = QLabel("Command: —")
-        self.interlock = QLabel("Interlock: —")
-
-        root.addWidget(self.state)
-        root.addWidget(self.command)
-        root.addWidget(self.interlock)
-
-        self.mode = ModeSelector()
-        self.mode.mode_requested.connect(
-            self._mode_changed
-        )
-        root.addWidget(self.mode)
-
-        buttons = QHBoxLayout()
-        buttons.setSpacing(5)
-
-        self.open_button = QPushButton("Open")
-        self.close_button = QPushButton("Close")
-
-        self.open_button.clicked.connect(
-            lambda: self._send("OPEN")
-        )
-        self.close_button.clicked.connect(
-            lambda: self._send("CLOSE")
-        )
-
-        buttons.addWidget(self.open_button)
-        buttons.addWidget(self.close_button)
-        root.addLayout(buttons)
-
-        self._refresh()
-
-    def open_for(
-        self,
-        valve_id: str,
-        description: str,
-        state: str,
-        command: str | None,
-        interlock: str | None,
-        mode: str,
-        global_pos,
-    ) -> None:
-        self.valve_id = valve_id
-
-        self.title.setText(
-            f"{valve_id} — {description}"
-        )
-        self.state.setText(
-            f"State: {state or '—'}"
-        )
-        self.command.setText(
-            f"Command: {command or '—'}"
-        )
-        self.interlock.setText(
-            f"Interlock: {interlock or '—'}"
-        )
-
-        self.mode.blockSignals(True)
-        self.mode.set_mode(mode)
-        self.mode.blockSignals(False)
-
-        self._refresh()
-        self.adjustSize()
-        self.move(global_pos)
-        self.show()
-        self.raise_()
-
-    def _mode_changed(self, mode: str) -> None:
-        if self.valve_id:
-            self.mode_requested.emit(
-                self.valve_id,
-                mode,
-            )
-        self._refresh()
-
-    def _refresh(self) -> None:
-        self.open_button.setEnabled(
-            self.mode.manual
-        )
-        self.close_button.setEnabled(
-            self.mode.manual
-        )
-
-    def _send(self, command: str) -> None:
-        if (
-            self.valve_id
-            and self.mode.manual
-        ):
-            self.command_requested.emit(
-                self.valve_id,
-                command,
-            )
-
 
 class PumpPopup(QFrame):
     command_requested = Signal(str, str)
@@ -864,7 +800,9 @@ class TankDetailPanel(QFrame):
 
 class MilkStorageCanvas(QWidget):
     tank_selected = Signal(str)
-    valve_selected = Signal(str, QPointF)
+    valve_selected = Signal(str)
+    valve_command_requested = Signal(str, str)
+    valve_mode_requested = Signal(str, str)
     pump_selected = Signal(str, QPointF)
 
     DESIGN_W = 1600.0
@@ -904,8 +842,8 @@ class MilkStorageCanvas(QWidget):
     PRODUCT_PORT_Y_RATIO = 0.80
     PRODUCT_PORT_X_OFFSET = 0.0
 
-    SUPPLY_PORT_Y_OFFSET = 8.0
-    SUPPLY_PORT_X_OFFSET = 0.0
+    SUPPLY_PORT_Y_OFFSET = 9.0
+    SUPPLY_PORT_X_OFFSET = - 30.0
 
     def __init__(
         self,
@@ -951,11 +889,6 @@ class MilkStorageCanvas(QWidget):
             for tank_id in self.TANK_IDS
         }
 
-        self.valve_data: dict[
-            str,
-            dict[str, Any],
-        ] = {}
-
         self.pump_data: dict[
             str,
             dict[str, Any],
@@ -974,11 +907,35 @@ class MilkStorageCanvas(QWidget):
             str,
             QRectF,
         ] = {}
-        self._valve_rects: dict[
-            str,
-            QRectF,
-        ] = {}
         self._pump_rect = QRectF()
+
+        self._valve_items: dict[
+            str,
+            ValveItem,
+        ] = {}
+
+        for valve_id in STORAGE_VALVE_IDS:
+            item = ValveItem(
+                valve_id=valve_id,
+                description=_storage_valve_description(
+                    valve_id
+                ),
+                orientation=_storage_valve_orientation(
+                    valve_id
+                ),
+                parent_widget=self,
+            )
+
+            item.command_requested.connect(
+                self.valve_command_requested.emit
+            )
+            item.mode_requested.connect(
+                self.valve_mode_requested.emit
+            )
+
+            self._valve_items[
+                valve_id
+            ] = item
 
         self._geometry: dict[
             str,
@@ -1015,15 +972,36 @@ class MilkStorageCanvas(QWidget):
         command: str | None = None,
         interlock: str | None = None,
     ) -> None:
-        self.valve_data[
+        item = self._valve_items.get(
             valve_id
-        ] = {
-            "state": state,
-            "command": command,
-            "interlock": interlock,
-        }
+        )
+
+        if item is None:
+            return
+
+        item.set_process_state(
+            state=state,
+            command=command,
+            interlock=interlock,
+        )
 
         self.update()
+
+    def set_valve_mode(
+        self,
+        valve_id: str,
+        mode: str,
+    ) -> None:
+        item = self._valve_items.get(
+            valve_id
+        )
+
+        if item is None:
+            return
+
+        item.set_mode(
+            mode
+        )
 
     def set_pump_state(
         self,
@@ -1132,7 +1110,6 @@ class MilkStorageCanvas(QWidget):
         painter: QPainter,
     ) -> None:
         self._tank_rects.clear()
-        self._valve_rects.clear()
         self._geometry.clear()
 
         physical_pen = QPen(
@@ -1206,11 +1183,11 @@ class MilkStorageCanvas(QWidget):
         self._draw_arrow(
             painter,
             QPointF(
-                185,
+                155,
                 supply_y,
             ),
             QPointF(
-                225,
+                190,
                 supply_y,
             ),
             self.BLUE,
@@ -1220,17 +1197,18 @@ class MilkStorageCanvas(QWidget):
             physical_pen
         )
         painter.drawLine(
-            QPointF(225, supply_y),
+            QPointF(216, supply_y),
             QPointF(245, supply_y),
         )
 
-        self._draw_valve(
+        self._valve_items[
+            "V-001"
+        ].draw(
             painter,
             QPointF(
                 205,
                 supply_y,
             ),
-            "V-001",
         )
 
         # CIP source route on RIGHT into the same header
@@ -1250,11 +1228,11 @@ class MilkStorageCanvas(QWidget):
         self._draw_arrow(
             painter,
             QPointF(
-                1510,
+                1545,
                 supply_y,
             ),
             QPointF(
-                1470,
+                1507,
                 supply_y,
             ),
             self.PURPLE,
@@ -1264,17 +1242,18 @@ class MilkStorageCanvas(QWidget):
             physical_pen
         )
         painter.drawLine(
-            QPointF(1470, supply_y),
+            QPointF(1479, supply_y),
             QPointF(1450, supply_y),
         )
 
-        self._draw_valve(
+        self._valve_items[
+            "V-002"
+        ].draw(
             painter,
             QPointF(
                 1490,
                 supply_y,
             ),
-            "V-002",
         )
 
         # Optional active CIP highlight OVER the same pipe.
@@ -1472,7 +1451,7 @@ class MilkStorageCanvas(QWidget):
             painter.setFont(title_font)
             painter.drawText(
                 QRectF(
-                    x - 76,
+                    x - 60,
                     tank_rect.top() - 28,
                     152,
                     22,
@@ -1517,10 +1496,11 @@ class MilkStorageCanvas(QWidget):
                 116,
             )
 
-            self._draw_valve(
+            self._valve_items[
+                inlet_id
+            ].draw(
                 painter,
                 inlet_center,
-                inlet_id,
             )
 
             painter.setPen(self.DARK)
@@ -1554,10 +1534,11 @@ class MilkStorageCanvas(QWidget):
                 return_y - 32,
             )
 
-            self._draw_valve(
+            self._valve_items[
+                outlet_id
+            ].draw(
                 painter,
                 outlet_center,
-                outlet_id,
             )
 
             painter.setPen(self.DARK)
@@ -1837,10 +1818,11 @@ class MilkStorageCanvas(QWidget):
             return_y,
         )
 
-        self._draw_valve(
+        self._valve_items[
+            "V-202"
+        ].draw(
             painter,
             cip_return_valve,
-            "V-202",
         )
 
         painter.setPen(
@@ -1852,25 +1834,14 @@ class MilkStorageCanvas(QWidget):
                 return_y,
             ),
             QPointF(
-                1470,
+                1474,
                 return_y,
             ),
         )
-        painter.drawLine(
-            QPointF(
-                1506,
-                return_y,
-            ),
-            QPointF(
-                1550,
-                return_y,
-            ),
-        )
-
         self._draw_arrow(
             painter,
             QPointF(
-                1515,
+                1503,
                 return_y,
             ),
             QPointF(
@@ -1897,112 +1868,6 @@ class MilkStorageCanvas(QWidget):
             "CIP RETURN",
         )
 
-    def _draw_valve(
-        self,
-        painter: QPainter,
-        center: QPointF,
-        valve_id: str,
-    ) -> None:
-        state = str(
-            self.valve_data.get(
-                valve_id,
-                {},
-            ).get("state")
-            or "UNKNOWN"
-        )
-
-        color = {
-            "OPEN": self.GREEN,
-            "CLOSED": self.GREY,
-            "OPENING": QColor("#bd8f2f"),
-            "CLOSING": QColor("#bd8f2f"),
-            "FAULT": self.RED,
-            "UNKNOWN": QColor("#9da8b3"),
-        }.get(
-            state,
-            QColor("#9da8b3"),
-        )
-
-        painter.setPen(
-            QPen(color, 2)
-        )
-        painter.setBrush(
-            QColor("#ffffff")
-        )
-
-        x = center.x()
-        y = center.y()
-
-        left = QPolygonF([
-            QPointF(
-                x - 11,
-                y - 9,
-            ),
-            QPointF(
-                x,
-                y,
-            ),
-            QPointF(
-                x - 11,
-                y + 9,
-            ),
-        ])
-
-        right = QPolygonF([
-            QPointF(
-                x + 11,
-                y - 9,
-            ),
-            QPointF(
-                x,
-                y,
-            ),
-            QPointF(
-                x + 11,
-                y + 9,
-            ),
-        ])
-
-        painter.drawPolygon(left)
-        painter.drawPolygon(right)
-
-        if state == "FAULT":
-            painter.setPen(
-                QPen(
-                    self.RED,
-                    2,
-                )
-            )
-            painter.drawLine(
-                QPointF(
-                    x - 5,
-                    y - 5,
-                ),
-                QPointF(
-                    x + 5,
-                    y + 5,
-                ),
-            )
-            painter.drawLine(
-                QPointF(
-                    x - 5,
-                    y + 5,
-                ),
-                QPointF(
-                    x + 5,
-                    y - 5,
-                ),
-            )
-
-        self._valve_rects[
-            valve_id
-        ] = QRectF(
-            x - 17,
-            y - 17,
-            34,
-            34,
-        )
-
     @staticmethod
     def _draw_arrow(
         painter: QPainter,
@@ -2013,7 +1878,10 @@ class MilkStorageCanvas(QWidget):
         painter.setPen(
             QPen(
                 color,
-                2,
+                5,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.SquareCap,
+                Qt.PenJoinStyle.MiterJoin,
             )
         )
         painter.setBrush(
@@ -2124,16 +1992,19 @@ class MilkStorageCanvas(QWidget):
 
         for (
             valve_id,
-            rect,
-        ) in self._valve_rects.items():
-            if rect.contains(
+            item,
+        ) in self._valve_items.items():
+            if item.contains(
                 design_point
             ):
                 self.valve_selected.emit(
-                    valve_id,
-                    QPointF(
-                        event.position()
-                    ),
+                    valve_id
+                )
+
+                item.open_popup(
+                    self.mapToGlobal(
+                        event.position().toPoint()
+                    )
                 )
                 return
 
@@ -2267,10 +2138,18 @@ class MilkStoragePage(QWidget):
             for tank_id in self.TANK_IDS
         }
 
-        self._valve_data: dict[
+        self._valves: dict[
             str,
-            dict[str, Any],
-        ] = {}
+            Valve,
+        ] = {
+            valve_id: Valve(
+                equipment_id=valve_id,
+                description=_storage_valve_description(
+                    valve_id
+                ),
+            )
+            for valve_id in STORAGE_VALVE_IDS
+        }
 
         self._pump_data: dict[
             str,
@@ -2309,7 +2188,6 @@ class MilkStoragePage(QWidget):
                 border-right: 1px solid #e0e6ed;
             }
 
-            QFrame#ValvePopup,
             QFrame#PumpPopup {
                 background: #f5f5f5;
                 border: 1px solid #b9c1c8;
@@ -2443,9 +2321,6 @@ class MilkStoragePage(QWidget):
             1,
         )
 
-        self.valve_popup = ValvePopup(
-            self
-        )
         self.pump_popup = PumpPopup(
             self
         )
@@ -2454,17 +2329,16 @@ class MilkStoragePage(QWidget):
             self._select_tank
         )
         self.canvas.valve_selected.connect(
-            self._open_valve_popup
+            self._valve_clicked
+        )
+        self.canvas.valve_command_requested.connect(
+            self._valve_command_requested
+        )
+        self.canvas.valve_mode_requested.connect(
+            self._mode_requested
         )
         self.canvas.pump_selected.connect(
             self._open_pump_popup
-        )
-
-        self.valve_popup.command_requested.connect(
-            self.valve_command_requested
-        )
-        self.valve_popup.mode_requested.connect(
-            self._mode_requested
         )
 
         self.pump_popup.command_requested.connect(
@@ -2503,10 +2377,9 @@ class MilkStoragePage(QWidget):
 
         self._refresh_route_status()
 
-    def _open_valve_popup(
+    def _valve_clicked(
         self,
         valve_id: str,
-        local_pos: QPointF,
     ) -> None:
         tank_id = self._tank_for_valve(
             valve_id
@@ -2516,39 +2389,6 @@ class MilkStoragePage(QWidget):
             self._select_tank(
                 tank_id
             )
-
-        data = self._valve_data.get(
-            valve_id,
-            {},
-        )
-
-        global_pos = (
-            self.canvas.mapToGlobal(
-                local_pos.toPoint()
-            )
-        )
-
-        self.valve_popup.open_for(
-            valve_id=valve_id,
-            description=self._valve_description(
-                valve_id
-            ),
-            state=str(
-                data.get("state")
-                or "UNKNOWN"
-            ),
-            command=data.get(
-                "command"
-            ),
-            interlock=data.get(
-                "interlock"
-            ),
-            mode=self._object_modes.get(
-                valve_id,
-                "AUTO",
-            ),
-            global_pos=global_pos,
-        )
 
     def _open_pump_popup(
         self,
@@ -2586,14 +2426,66 @@ class MilkStoragePage(QWidget):
             global_pos=global_pos,
         )
 
+    def _valve_command_requested(
+        self,
+        valve_id: str,
+        command: str,
+    ) -> None:
+        """
+        Store the operator request in the process-level Valve object first,
+        then forward the request to the controller/simulator.
+
+        The actual valve state is deliberately NOT changed here.
+        It must come back later through set_valve_state() as process feedback.
+        """
+        valve = self._valves.get(
+            valve_id
+        )
+
+        if valve is None:
+            return
+
+        valve.set_command(
+            command
+        )
+
+        # Keep the reusable UI component in sync with the requested command
+        # while preserving the current feedback state and interlock.
+        self.canvas.set_valve_state(
+            valve_id,
+            valve.state,
+            valve.command,
+            valve.interlock,
+        )
+
+        # Forward the request to the next layer:
+        # simulator now / real controller or PLC integration later.
+        self.valve_command_requested.emit(
+            valve_id,
+            command,
+        )
+
     def _mode_requested(
         self,
         object_id: str,
         mode: str,
     ) -> None:
-        self._object_modes[
+        valve = self._valves.get(
             object_id
-        ] = mode
+        )
+
+        if valve is not None:
+            valve.set_mode(
+                mode
+            )
+            self.canvas.set_valve_mode(
+                object_id,
+                mode,
+            )
+        else:
+            self._object_modes[
+                object_id
+            ] = mode
 
         self.control_mode_requested.emit(
             object_id,
@@ -2712,19 +2604,24 @@ class MilkStoragePage(QWidget):
         command: str | None = None,
         interlock: str | None = None,
     ) -> None:
-        self._valve_data[
+        valve = self._valves.get(
             valve_id
-        ] = {
-            "state": state,
-            "command": command,
-            "interlock": interlock,
-        }
+        )
+
+        if valve is None:
+            return
+
+        valve.update_process_state(
+            state=state,
+            command=command,
+            interlock=interlock,
+        )
 
         self.canvas.set_valve_state(
             valve_id,
-            state,
-            command,
-            interlock,
+            valve.state,
+            valve.command,
+            valve.interlock,
         )
 
         self._refresh_route_status()
@@ -2781,14 +2678,12 @@ class MilkStoragePage(QWidget):
             + 1
         )
 
-        inlet = self._valve_data.get(
-            f"V-10{index}",
-            {},
+        inlet = self._valves.get(
+            f"V-10{index}"
         )
 
-        outlet = self._valve_data.get(
-            f"V-11{index}",
-            {},
+        outlet = self._valves.get(
+            f"V-11{index}"
         )
 
         pump = self._pump_data.get(
@@ -2797,11 +2692,15 @@ class MilkStoragePage(QWidget):
         )
 
         self.detail_panel.set_route_status(
-            inlet_state=inlet.get(
-                "state"
+            inlet_state=(
+                inlet.state
+                if inlet is not None
+                else None
             ),
-            outlet_state=outlet.get(
-                "state"
+            outlet_state=(
+                outlet.state
+                if outlet is not None
+                else None
             ),
             pump_state=pump.get(
                 "state"
@@ -2840,35 +2739,3 @@ class MilkStoragePage(QWidget):
             )
 
         return None
-
-    @staticmethod
-    def _valve_description(
-        valve_id: str,
-    ) -> str:
-        descriptions = {
-            "V-001": "Milk reception route valve",
-            "V-002": "CIP supply route valve",
-            "V-201": "Pasteurization route valve",
-            "V-202": "CIP return route valve",
-        }
-
-        if valve_id in descriptions:
-            return descriptions[
-                valve_id
-            ]
-
-        if valve_id.startswith(
-            "V-10"
-        ):
-            return (
-                "Tank supply mixproof valve"
-            )
-
-        if valve_id.startswith(
-            "V-11"
-        ):
-            return (
-                "Tank product / CIP return mixproof valve"
-            )
-
-        return "Process routing valve"
