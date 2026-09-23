@@ -1,6 +1,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
+    QFrame,
     QGraphicsView,
     QVBoxLayout,
     QWidget,
@@ -24,27 +25,62 @@ class OverviewPage(QWidget):
         self.setObjectName("OverviewPage")
         self.setStyleSheet("""
             QWidget#OverviewPage {
-                background: #f3f5f9;
+                background: #ffffff;
+            }
+
+            QFrame#OverviewContent {
+                background: #ffffff;
+                border: none;
             }
 
             QGraphicsView#OverviewView {
-                background: white;
-                border: 1px solid #d9e0e8;
-                border-radius: 8px;
+                background: #ffffff;
+                border: none;
+                border-radius: 0px;
             }
         """)
 
+        # Same outer composition as Milk Storage:
+        # 10 px page margin + one white content surface.
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
+        root.setContentsMargins(
+            10,
+            10,
+            10,
+            10,
+        )
         root.setSpacing(0)
 
+        self.content_frame = QFrame(self)
+        self.content_frame.setObjectName(
+            "OverviewContent"
+        )
+
+        content = QVBoxLayout(
+            self.content_frame
+        )
+        content.setContentsMargins(
+            0,
+            0,
+            0,
+            0,
+        )
+        content.setSpacing(0)
+
         self.scene = EquipmentScene()
+        # Keep the scene and the page on the same white surface.
+        self.scene.setBackgroundBrush(
+            Qt.GlobalColor.white
+        )
 
         self.view = QGraphicsView(
             self.scene
         )
         self.view.setObjectName(
             "OverviewView"
+        )
+        self.view.viewport().setStyleSheet(
+            "background: white; border: none;"
         )
 
         self.view.setFrameShape(
@@ -77,7 +113,15 @@ class OverviewPage(QWidget):
             QGraphicsView.ViewportAnchor.AnchorViewCenter
         )
 
-        root.addWidget(self.view)
+        content.addWidget(
+            self.view,
+            1,
+        )
+
+        root.addWidget(
+            self.content_frame,
+            1,
+        )
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

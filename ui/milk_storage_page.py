@@ -7,7 +7,9 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QPalette,
     QImage,
+    QIntValidator,
     QPainter,
     QPen,
     QPixmap,
@@ -15,11 +17,17 @@ from PySide6.QtGui import (
     QTransform,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
+    QComboBox,
+    QDialog,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QSizePolicy,
@@ -246,6 +254,16 @@ class ValueLabel(QLabel):
     def __init__(self, text: str = "—", parent=None):
         super().__init__(text, parent)
         self.setObjectName("ValueLabel")
+
+        # The text may change continuously, but its sizeHint must not
+        # resize the surrounding section. It is simply painted inside the
+        # geometry assigned by the grid.
+        self.setMinimumWidth(0)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+
         self.setAlignment(
             Qt.AlignmentFlag.AlignRight
             | Qt.AlignmentFlag.AlignVCenter
@@ -271,8 +289,24 @@ class ModeSelector(QWidget):
 
         self.auto_button.setChecked(True)
 
-        self.auto_button.toggled.connect(self._emit)
-        self.manual_button.toggled.connect(self._emit)
+        # A radio-button switch changes TWO checked states:
+        # the old button becomes unchecked and the new one becomes checked.
+        # Emit a mode command only for the button that becomes checked,
+        # otherwise every operator switch generates two SET_MODE commands.
+        self.auto_button.toggled.connect(
+            lambda checked: (
+                self.mode_requested.emit("AUTO")
+                if checked
+                else None
+            )
+        )
+        self.manual_button.toggled.connect(
+            lambda checked: (
+                self.mode_requested.emit("MANUAL")
+                if checked
+                else None
+            )
+        )
 
         root.addWidget(self.auto_button)
         root.addWidget(self.manual_button)
@@ -283,18 +317,16 @@ class ModeSelector(QWidget):
         return self.manual_button.isChecked()
 
     def set_mode(self, mode: str) -> None:
+        self.auto_button.blockSignals(True)
+        self.manual_button.blockSignals(True)
+
         if mode == "MANUAL":
             self.manual_button.setChecked(True)
         else:
             self.auto_button.setChecked(True)
 
-    def _emit(self) -> None:
-        self.mode_requested.emit(
-            "MANUAL"
-            if self.manual_button.isChecked()
-            else "AUTO"
-        )
-
+        self.auto_button.blockSignals(False)
+        self.manual_button.blockSignals(False)
 
 class AgitatorSwitch(QWidget):
     running_requested = Signal(bool)
@@ -344,6 +376,51 @@ class AgitatorSwitch(QWidget):
         )
         root.addStretch()
 
+    def set_manual_permissions(
+        self,
+        manual: bool,
+        can_start: bool,
+        reason: str | None = None,
+    ) -> None:
+        self.setEnabled(
+            manual
+        )
+
+        if not manual:
+            self.on_button.setEnabled(
+                False
+            )
+            self.off_button.setEnabled(
+                False
+            )
+            self.setToolTip(
+                "Switch the agitator to MANUAL for direct ON/OFF control."
+            )
+            return
+
+        self.on_button.setEnabled(
+            bool(can_start)
+        )
+        self.off_button.setEnabled(
+            True
+        )
+
+        tooltip = (
+            ""
+            if can_start
+            else (
+                reason
+                or "Agitator start is currently inhibited."
+            )
+        )
+
+        self.setToolTip(
+            tooltip
+        )
+        self.on_button.setToolTip(
+            tooltip
+        )
+
     def set_running(
         self,
         running: bool,
@@ -372,10 +449,483 @@ class AgitatorSwitch(QWidget):
         )
 
 
+
+class MilkReceptionDialog(QDialog):
+    def __init__(
+        self,
+        tank_data: Mapping[str, Mapping[str, Any]],
+        selected_tank_id: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+
+        self._tank_data = tank_data
+        self._command = "START"
+
+        self.setWindowTitle("Milk Reception")
+        self.setObjectName("MilkReceptionDialog")
+        self.setModal(True)
+        self.setMinimumWidth(470)
+
+        self._apply_theme()
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
+
+        title = QLabel("Receive raw milk")
+        title.setObjectName("ReceptionTitle")
+        root.addWidget(title)
+
+        hint = QLabel(
+            "Choose the destination tank and the tanker delivery volume."
+        )
+        hint.setObjectName("ReceptionHint")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+
+        self.tank_combo = QComboBox()
+        self.tank_combo.setMinimumWidth(270)
+        self.tank_combo.setMinimumHeight(28)
+        self.tank_combo.setMaxVisibleItems(8)
+
+        for tank_id in (
+            "01-TK1A",
+            "01-TK1B",
+            "01-TK1C",
+            "01-TK1D",
+        ):
+            data = tank_data.get(tank_id, {})
+            volume_l = float(
+                data.get("volume_l", 0.0)
+                or 0.0
+            )
+            working_l = float(
+                data.get(
+                    "working_capacity_l",
+                    0.0,
+                )
+                or 0.0
+            )
+            state = str(
+                data.get(
+                    "state",
+                    "UNKNOWN",
+                )
+            )
+
+            self.tank_combo.addItem(
+                (
+                    f"{tank_id} — "
+                    f"{volume_l:,.0f} / "
+                    f"{working_l:,.0f} L — "
+                    f"{state}"
+                ),
+                tank_id,
+            )
+
+        current_index = (
+            self.tank_combo.findData(
+                selected_tank_id
+            )
+        )
+        if current_index >= 0:
+            self.tank_combo.setCurrentIndex(
+                current_index
+            )
+
+        self.volume_edit = QLineEdit()
+        self.volume_edit.setMinimumWidth(270)
+        self.volume_edit.setMinimumHeight(28)
+        self.volume_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.volume_edit.setAlignment(
+            Qt.AlignmentFlag.AlignLeft
+            | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.volume_edit.setPlaceholderText(
+            "5000"
+        )
+
+        self._volume_validator = QIntValidator(
+            0,
+            18_000,
+            self,
+        )
+        self.volume_edit.setValidator(
+            self._volume_validator
+        )
+
+        self.capacity_info = QLabel()
+        self.capacity_info.setObjectName("CapacityInfo")
+        self.capacity_info.setWordWrap(False)
+
+        self.reason_label = QLabel()
+        self.reason_label.setObjectName("ReceptionReason")
+        self.reason_label.setWordWrap(True)
+        self.reason_label.setMinimumHeight(20)
+
+        form.addRow(
+            "Destination",
+            self.tank_combo,
+        )
+        form.addRow(
+            "Delivery volume",
+            self.volume_edit,
+        )
+        form.addRow(
+            "Tank capacity",
+            self.capacity_info,
+        )
+
+        root.addLayout(form)
+        root.addWidget(self.reason_label)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+
+        cancel_button = QPushButton("Cancel")
+        cancel_button.setObjectName(
+            "ReceptionCancelButton"
+        )
+
+        self.start_button = QPushButton(
+            "Start Reception"
+        )
+        self.start_button.setObjectName(
+            "ReceptionStartButton"
+        )
+
+        cancel_button.clicked.connect(
+            self.reject
+        )
+        self.start_button.clicked.connect(
+            self.accept
+        )
+
+        buttons.addWidget(cancel_button)
+        buttons.addWidget(self.start_button)
+        root.addLayout(buttons)
+
+        self.tank_combo.currentIndexChanged.connect(
+            self._refresh
+        )
+
+        self._refresh()
+
+    def _apply_theme(self) -> None:
+        app_palette = QApplication.palette()
+        window_color = app_palette.color(
+            QPalette.ColorRole.Window
+        )
+
+        dark = (
+            window_color.lightness()
+            < 128
+        )
+
+        if dark:
+            background = "#2c2c2e"
+            field_background = "#3a3a3c"
+            button_background = "#48484a"
+            border = "#5a5a5e"
+            text = "#f2f2f7"
+            muted = "#b8b8bd"
+            disabled_text = "#7d7d82"
+            disabled_background = "#38383a"
+            primary = "#0a84ff"
+            primary_hover = "#409cff"
+            primary_pressed = "#0071e3"
+            error = "#ff6b6b"
+        else:
+            background = "#f6f6f7"
+            field_background = "#ffffff"
+            button_background = "#ffffff"
+            border = "#c7c7cc"
+            text = "#1f2937"
+            muted = "#667085"
+            disabled_text = "#9ca3af"
+            disabled_background = "#ececef"
+            primary = "#0a84ff"
+            primary_hover = "#0077ed"
+            primary_pressed = "#006edb"
+            error = "#c24141"
+
+        self._dialog_muted_color = muted
+        self._dialog_error_color = error
+
+        self.setStyleSheet(
+            f"""
+            QDialog#MilkReceptionDialog {{
+                background: {background};
+                color: {text};
+            }}
+
+            QDialog#MilkReceptionDialog QLabel {{
+                color: {text};
+                background: transparent;
+                font-size: 12px;
+            }}
+
+            QDialog#MilkReceptionDialog QLabel#ReceptionTitle {{
+                color: {text};
+                font-size: 15px;
+                font-weight: 700;
+            }}
+
+            QDialog#MilkReceptionDialog QLabel#ReceptionHint,
+            QDialog#MilkReceptionDialog QLabel#CapacityInfo {{
+                color: {muted};
+                font-size: 11px;
+            }}
+
+            /*
+             * Destination and Delivery volume deliberately keep the native
+             * Qt/macOS controls. We do not override their arrow/stepper
+             * subcontrols here, so macOS draws the normal chevron and
+             * spin-box controls in both Light and Dark appearance.
+             */
+
+            QDialog#MilkReceptionDialog QPushButton {{
+                min-width: 92px;
+                min-height: 28px;
+                padding: 2px 12px;
+                color: {text};
+                background: {button_background};
+                border: 1px solid {border};
+                border-radius: 5px;
+                font-size: 12px;
+            }}
+
+            QDialog#MilkReceptionDialog QPushButton:hover {{
+                border-color: {primary};
+            }}
+
+            QDialog#MilkReceptionDialog QPushButton#ReceptionStartButton {{
+                color: white;
+                background: {primary};
+                border-color: {primary};
+                font-weight: 600;
+            }}
+
+            QDialog#MilkReceptionDialog QPushButton#ReceptionStartButton:hover {{
+                background: {primary_hover};
+                border-color: {primary_hover};
+            }}
+
+            QDialog#MilkReceptionDialog QPushButton#ReceptionStartButton:pressed {{
+                background: {primary_pressed};
+                border-color: {primary_pressed};
+            }}
+
+            QDialog#MilkReceptionDialog QPushButton:disabled {{
+                color: {disabled_text};
+                background: {disabled_background};
+                border-color: {border};
+            }}
+            """
+        )
+
+    @property
+    def selected_tank_id(self) -> str:
+        return str(
+            self.tank_combo.currentData()
+        )
+
+    @property
+    def delivery_volume_l(self) -> float:
+        value = self.volume_edit.text().strip()
+
+        if not value:
+            return 0.0
+
+        try:
+            return float(
+                int(value)
+            )
+        except ValueError:
+            return 0.0
+
+    @property
+    def command(self) -> str:
+        return self._command
+
+    def _refresh(self) -> None:
+        tank_id = self.selected_tank_id
+        data = self._tank_data.get(
+            tank_id,
+            {},
+        )
+
+        volume_l = float(
+            data.get("volume_l", 0.0)
+            or 0.0
+        )
+        nominal_l = float(
+            data.get(
+                "nominal_capacity_l",
+                0.0,
+            )
+            or 0.0
+        )
+        working_l = float(
+            data.get(
+                "working_capacity_l",
+                0.0,
+            )
+            or 0.0
+        )
+        free_l = max(
+            0.0,
+            working_l - volume_l,
+        )
+
+        self.capacity_info.setText(
+            (
+                f"Current {volume_l:,.0f} L; "
+                f"working {working_l:,.0f} L; "
+                f"nominal {nominal_l:,.0f} L; "
+                f"free {free_l:,.0f} L"
+            )
+        )
+
+        reception_active = bool(
+            data.get(
+                "reception_active",
+                False,
+            )
+        )
+
+        if reception_active:
+            self._command = "STOP"
+            self.volume_edit.setEnabled(False)
+            self.start_button.setText(
+                "Stop Reception"
+            )
+            self.start_button.setEnabled(True)
+
+            requested_l = data.get(
+                "reception_requested_l"
+            )
+            received_l = data.get(
+                "reception_received_l"
+            )
+
+            self.reason_label.setStyleSheet(
+                f"color: {self._dialog_muted_color};"
+            )
+
+            if (
+                requested_l is not None
+                and received_l is not None
+            ):
+                self.reason_label.setText(
+                    (
+                        f"Active delivery: "
+                        f"{float(received_l):,.0f} / "
+                        f"{float(requested_l):,.0f} L received."
+                    )
+                )
+            else:
+                self.reason_label.setText(
+                    "Milk reception is active for this tank."
+                )
+
+            return
+
+        self._command = "START"
+        self.volume_edit.setEnabled(True)
+        self.start_button.setText(
+            "Start Reception"
+        )
+
+        maximum_l = max(
+            0,
+            int(free_l),
+        )
+
+        self._volume_validator.setTop(
+            maximum_l
+        )
+
+        if maximum_l > 0:
+            current_text = (
+                self.volume_edit.text().strip()
+            )
+
+            try:
+                current_value = int(
+                    current_text
+                )
+            except ValueError:
+                current_value = 0
+
+            if (
+                current_value <= 0
+                or current_value > maximum_l
+            ):
+                self.volume_edit.setText(
+                    str(
+                        min(
+                            5_000,
+                            maximum_l,
+                        )
+                    )
+                )
+        else:
+            self.volume_edit.clear()
+
+        permissive = bool(
+            data.get(
+                "reception_permissive",
+                False,
+            )
+        )
+        reason = data.get(
+            "reception_inhibit_reason"
+        )
+
+        self.start_button.setEnabled(
+            permissive
+            and maximum_l > 0
+        )
+
+        self.reason_label.setStyleSheet(
+            f"color: {self._dialog_error_color};"
+        )
+        self.reason_label.setText(
+            str(
+                reason
+                or (
+                    ""
+                    if maximum_l > 0
+                    else "No free working volume in this tank."
+                )
+            )
+        )
+
+
 class DetailSection(QFrame):
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
         self.setObjectName("DetailSection")
+
+        # Parent stretch factors own the horizontal geometry.
+        # Content text must never resize neighbouring sections.
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.setMinimumWidth(0)
 
         self.root = QVBoxLayout(self)
         self.root.setContentsMargins(10, 7, 10, 7)
@@ -513,6 +1063,7 @@ class PumpPopup(QFrame):
 class TankDetailPanel(QFrame):
     control_mode_requested = Signal(str, str)
     agitator_requested = Signal(str, bool)
+    transfer_requested = Signal(str, str)
     cip_requested = Signal(str)
 
     def __init__(
@@ -524,6 +1075,8 @@ class TankDetailPanel(QFrame):
 
         self.setObjectName("TankDetailPanel")
         self.selected_tank_id = "01-TK1A"
+        self._transfer_active = False
+        self._transfer_permissive = False
 
         tank_pixmap = _trim_visual_pixmap(
             QPixmap(str(tank_image_path))
@@ -531,8 +1084,8 @@ class TankDetailPanel(QFrame):
 
         self.small_tank_pixmap = (
             tank_pixmap.scaled(
-                52,
-                96,
+                50,
+                80,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
@@ -559,7 +1112,8 @@ class TankDetailPanel(QFrame):
         summary_body.setSpacing(8)
 
         small_tank = QLabel()
-        small_tank.setFixedWidth(58)
+        small_tank.setFixedWidth(56)
+        small_tank.setMinimumHeight(80)
         small_tank.setAlignment(
             Qt.AlignmentFlag.AlignCenter
         )
@@ -572,6 +1126,10 @@ class TankDetailPanel(QFrame):
         summary_grid = QGridLayout()
         summary_grid.setHorizontalSpacing(8)
         summary_grid.setVerticalSpacing(2)
+        summary_grid.setColumnMinimumWidth(0, 66)
+        summary_grid.setColumnMinimumWidth(1, 82)
+        summary_grid.setColumnStretch(0, 0)
+        summary_grid.setColumnStretch(1, 1)
 
         self.level = ValueLabel()
         self.volume = ValueLabel()
@@ -608,6 +1166,18 @@ class TankDetailPanel(QFrame):
 
         agitator = DetailSection("Agitator")
 
+        self.agitator_mode = ModeSelector()
+        self.agitator_mode.mode_requested.connect(
+            lambda mode:
+            self.control_mode_requested.emit(
+                self.selected_tank_id,
+                mode,
+            )
+        )
+        agitator.root.addWidget(
+            self.agitator_mode
+        )
+
         self.agitator_control = AgitatorSwitch()
         self.agitator_control.running_requested.connect(
             lambda running:
@@ -623,6 +1193,10 @@ class TankDetailPanel(QFrame):
         agitator_grid = QGridLayout()
         agitator_grid.setHorizontalSpacing(8)
         agitator_grid.setVerticalSpacing(2)
+        agitator_grid.setColumnMinimumWidth(0, 62)
+        agitator_grid.setColumnMinimumWidth(1, 82)
+        agitator_grid.setColumnStretch(0, 0)
+        agitator_grid.setColumnStretch(1, 1)
 
         self.agitator_state = ValueLabel()
         self.agitator_speed = ValueLabel()
@@ -651,10 +1225,29 @@ class TankDetailPanel(QFrame):
         routing = DetailSection(
             "Transfer / routing"
         )
+        routing.root.setContentsMargins(
+            10,
+            5,
+            10,
+            5,
+        )
+        routing.root.setSpacing(1)
 
         routing_grid = QGridLayout()
         routing_grid.setHorizontalSpacing(8)
-        routing_grid.setVerticalSpacing(2)
+        routing_grid.setVerticalSpacing(0)
+        routing_grid.setColumnMinimumWidth(0, 82)
+        routing_grid.setColumnMinimumWidth(1, 142)
+        routing_grid.setColumnStretch(0, 0)
+        routing_grid.setColumnStretch(1, 1)
+
+        # Prevent the fixed-height detail card from squeezing the four
+        # process rows on top of each other.
+        for row in range(4):
+            routing_grid.setRowMinimumHeight(
+                row,
+                14,
+            )
 
         self.inlet = ValueLabel()
         self.outlet = ValueLabel()
@@ -682,19 +1275,73 @@ class TankDetailPanel(QFrame):
             routing_grid
         )
 
-        hint = QLabel(
-            "Click a valve or pump in the scheme for manual control."
+        routing_hint = QLabel(
+            "AUTO builds the route and operates the required valves / pump."
         )
-        hint.setObjectName(
-            "HintLabel"
+        routing_hint.setObjectName(
+            "RoutingHintLabel"
         )
-        routing.root.addWidget(hint)
+        routing_hint.setWordWrap(False)
+        routing_hint.setFixedHeight(13)
+        routing_hint.setMinimumWidth(0)
+        routing_hint.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
+        routing.root.addWidget(
+            routing_hint
+        )
+
+        # Both action buttons are pinned to the bottom of their sections.
+        # This keeps Send to Pasteurization and Start CIP on exactly the
+        # same horizontal line.
+        routing.root.addStretch(1)
+
+        self.transfer_button = QPushButton(
+            "Send to Pasteurization"
+        )
+        self.transfer_button.setToolTip(
+            "AUTO builds the route and operates the required valves / pump."
+        )
+        self.transfer_button.setEnabled(
+            False
+        )
+        self.transfer_button.setFixedHeight(
+            26
+        )
+        self.transfer_button.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.transfer_button.clicked.connect(
+            self._request_transfer
+        )
+        routing.root.addWidget(
+            self.transfer_button
+        )
 
         cip = DetailSection("CIP")
+        cip.root.setContentsMargins(
+            10,
+            5,
+            10,
+            5,
+        )
+        cip.root.setSpacing(1)
 
         cip_grid = QGridLayout()
         cip_grid.setHorizontalSpacing(8)
-        cip_grid.setVerticalSpacing(2)
+        cip_grid.setVerticalSpacing(0)
+        cip_grid.setColumnMinimumWidth(0, 56)
+        cip_grid.setColumnMinimumWidth(1, 130)
+        cip_grid.setColumnStretch(0, 0)
+        cip_grid.setColumnStretch(1, 1)
+
+        for row in range(3):
+            cip_grid.setRowMinimumHeight(
+                row,
+                14,
+            )
 
         self.cip_state = ValueLabel()
         self.cip_phase = ValueLabel()
@@ -717,12 +1364,20 @@ class TankDetailPanel(QFrame):
             )
 
         cip.root.addLayout(cip_grid)
+        cip.root.addStretch(1)
 
         self.start_cip_button = QPushButton(
             "Start CIP"
         )
         self.start_cip_button.setEnabled(
             False
+        )
+        self.start_cip_button.setFixedHeight(
+            26
+        )
+        self.start_cip_button.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
         )
         self.start_cip_button.clicked.connect(
             lambda:
@@ -734,10 +1389,26 @@ class TankDetailPanel(QFrame):
             self.start_cip_button
         )
 
-        sections.addWidget(summary, 1)
-        sections.addWidget(agitator, 1)
-        sections.addWidget(routing, 1)
-        sections.addWidget(cip, 1)
+        # Stable proportional layout without any large minimum widths.
+        # Dynamic values cannot resize sections because ValueLabel and
+        # DetailSection both ignore horizontal content size hints.
+        #
+        # At the normal application width this gives approximately the same
+        # visual proportions as the earlier reference layout:
+        # Selected tank | Agitator | Transfer/routing | CIP.
+        # Stable, content-independent section proportions.
+        # ValueLabel and DetailSection ignore horizontal content sizeHints,
+        # so changing 0 L -> 18000 L or EMPTY -> RECEIVING cannot move
+        # the vertical section borders.
+        sections.addWidget(summary, 25)
+        sections.addWidget(agitator, 22)
+        sections.addWidget(routing, 32)
+        sections.addWidget(cip, 21)
+
+        sections.setStretch(0, 25)
+        sections.setStretch(1, 22)
+        sections.setStretch(2, 32)
+        sections.setStretch(3, 21)
 
         root.addLayout(sections)
 
@@ -804,6 +1475,39 @@ class TankDetailPanel(QFrame):
                 f"{hours} h {minutes} min"
             )
 
+        agitator_mode = str(
+            data.get(
+                "agitator_mode",
+                "AUTO",
+            )
+        ).upper()
+
+        self.agitator_mode.set_mode(
+            agitator_mode
+        )
+
+        agitator_start_permissive = bool(
+            data.get(
+                "agitator_start_permissive",
+                False,
+            )
+        )
+        agitator_inhibit_reason = data.get(
+            "agitator_inhibit_reason"
+        )
+
+        self.agitator_control.set_manual_permissions(
+            manual=(
+                agitator_mode == "MANUAL"
+            ),
+            can_start=agitator_start_permissive,
+            reason=(
+                str(agitator_inhibit_reason)
+                if agitator_inhibit_reason
+                else None
+            ),
+        )
+
         agitator = data.get(
             "agitator_running"
         )
@@ -816,11 +1520,30 @@ class TankDetailPanel(QFrame):
                 False
             )
         else:
-            self.agitator_state.setText(
-                "ON"
-                if agitator
-                else "OFF"
-            )
+            if (
+                not agitator
+                and agitator_mode == "MANUAL"
+                and not agitator_start_permissive
+            ):
+                self.agitator_state.setText(
+                    "BLOCKED"
+                )
+                self.agitator_state.setToolTip(
+                    str(
+                        agitator_inhibit_reason
+                        or "Agitator start is inhibited."
+                    )
+                )
+            else:
+                self.agitator_state.setText(
+                    "ON"
+                    if agitator
+                    else "OFF"
+                )
+                self.agitator_state.setToolTip(
+                    ""
+                )
+
             self.agitator_control.set_running(
                 bool(agitator)
             )
@@ -879,6 +1602,49 @@ class TankDetailPanel(QFrame):
             )
         )
 
+        self._transfer_active = bool(
+            data.get(
+                "transfer_active",
+                False,
+            )
+        )
+        self._transfer_permissive = bool(
+            data.get(
+                "transfer_permissive",
+                False,
+            )
+        )
+
+        if self._transfer_active:
+            self.transfer_button.setText(
+                "Stop Transfer"
+            )
+            self.transfer_button.setEnabled(
+                True
+            )
+            self.transfer_button.setToolTip(
+                "Stop the automatic route from this tank."
+            )
+        else:
+            self.transfer_button.setText(
+                "Send to Pasteurization"
+            )
+            self.transfer_button.setEnabled(
+                self._transfer_permissive
+            )
+            self.transfer_button.setToolTip(
+                str(
+                    data.get(
+                        "transfer_inhibit_reason"
+                    )
+                    or (
+                        "Start the automatic route to pasteurization."
+                        if self._transfer_permissive
+                        else "Transfer is not permitted."
+                    )
+                )
+            )
+
         self.start_cip_button.setEnabled(
             bool(
                 data.get(
@@ -886,6 +1652,26 @@ class TankDetailPanel(QFrame):
                     False,
                 )
             )
+        )
+
+    def _request_transfer(
+        self,
+    ) -> None:
+        command = (
+            "STOP"
+            if self._transfer_active
+            else "START"
+        )
+
+        if (
+            command == "START"
+            and not self._transfer_permissive
+        ):
+            return
+
+        self.transfer_requested.emit(
+            self.selected_tank_id,
+            command,
         )
 
     def set_route_status(
@@ -925,6 +1711,7 @@ class TankDetailPanel(QFrame):
 
 class MilkStorageCanvas(QWidget):
     tank_selected = Signal(str)
+    milk_reception_clicked = Signal()
     valve_selected = Signal(str)
     valve_command_requested = Signal(str, str)
     valve_mode_requested = Signal(str, str)
@@ -983,6 +1770,13 @@ class MilkStorageCanvas(QWidget):
         )
         self.setMinimumHeight(420)
         self.setMouseTracking(True)
+
+        self._milk_reception_hit_rect = QRectF(
+            770.0,
+            34.0,
+            225.0,
+            82.0,
+        )
 
         self.tank_pixmap = _trim_visual_pixmap(
             QPixmap(str(tank_image_path))
@@ -1052,6 +1846,11 @@ class MilkStorageCanvas(QWidget):
             str,
             dict[str, Any],
         ] = {}
+
+        self.active_routes: tuple[
+            dict[str, Any],
+            ...
+        ] = ()
 
         # One physical pipeline can carry product or CIP.
         # The line itself does not duplicate; media state changes its highlight.
@@ -1277,6 +2076,16 @@ class MilkStorageCanvas(QWidget):
 
         self.update()
 
+    def set_active_routes(
+        self,
+        routes,
+    ) -> None:
+        self.active_routes = tuple(
+            dict(route)
+            for route in routes
+        )
+        self.update()
+
     def set_route_media(
         self,
         supply_media: str | None = None,
@@ -1495,16 +2304,35 @@ class MilkStorageCanvas(QWidget):
         # ----------------------------------------------------
         milk_inlet_x = 810.0
 
-        painter.setPen(self.BLUE)
+        reception_active = any(
+            str(
+                data.get(
+                    "state",
+                    "",
+                )
+            ).upper()
+            == "RECEIVING"
+            for data in self.tank_data.values()
+        )
+
+        painter.setPen(
+            self.GREEN
+            if reception_active
+            else self.BLUE
+        )
         painter.setFont(title_font)
         painter.drawText(
             QRectF(
                 milk_inlet_x + 18.0,
                 43,
-                150,
+                190,
                 24,
             ),
-            "MILK RECEPTION",
+            (
+                "MILK RECEPTION • ACTIVE"
+                if reception_active
+                else "MILK RECEPTION ▼"
+            ),
         )
 
         # Match the CIP arrows: 35 px arrow length.
@@ -2008,6 +2836,43 @@ class MilkStorageCanvas(QWidget):
                 )
 
         # ----------------------------------------------------
+        # Active-route halo.
+        #
+        # Paint it BEFORE equipment pixmaps. This is important:
+        # the halo uses the exact same pipe endpoints as the physical
+        # route, while the tank image naturally masks the covered part.
+        # ----------------------------------------------------
+        route_suction_port = QPointF(
+            245.0,
+            return_y,
+        )
+        route_discharge_port = QPointF(
+            190.0,
+            return_y,
+        )
+        route_pasteurization_top_y = (
+            return_y
+            - 122.0
+        )
+        route_section_a_cip_valve_x = 730.0
+
+        self._paint_active_route_overlays(
+            painter,
+            supply_y=supply_y,
+            return_y=return_y,
+            right_section_y=right_section_y,
+            milk_inlet_x=milk_inlet_x,
+            suction_port=route_suction_port,
+            discharge_port=route_discharge_port,
+            pasteurization_top_y=(
+                route_pasteurization_top_y
+            ),
+            section_a_cip_valve_x=(
+                route_section_a_cip_valve_x
+            ),
+        )
+
+        # ----------------------------------------------------
         # Four tanks + individual mixproof routing valves
         # ----------------------------------------------------
         for tank_id in self.TANK_IDS:
@@ -2487,6 +3352,315 @@ class MilkStorageCanvas(QWidget):
             "CIP RETURN",
         )
 
+    def _paint_active_route_overlays(
+        self,
+        painter: QPainter,
+        *,
+        supply_y: float,
+        return_y: float,
+        right_section_y: float,
+        milk_inlet_x: float,
+        suction_port: QPointF,
+        discharge_port: QPointF,
+        pasteurization_top_y: float,
+        section_a_cip_valve_x: float,
+    ) -> None:
+        if not self.active_routes:
+            return
+
+        for route in self.active_routes:
+            operation = str(
+                route.get(
+                    "operation",
+                    "",
+                )
+            )
+            tank_id = str(
+                route.get(
+                    "tank_id",
+                    "",
+                )
+            )
+            state = str(
+                route.get(
+                    "state",
+                    "",
+                )
+            )
+
+            geometry = self._geometry.get(
+                tank_id
+            )
+            if geometry is None:
+                continue
+
+            if state == "FAULT":
+                halo_color = QColor("#dc2626")
+            elif state == "ACTIVE":
+                halo_color = (
+                    QColor(
+                        self.PURPLE
+                    )
+                    if operation == "CIP"
+                    else QColor(
+                        self.BLUE
+                    )
+                )
+            else:
+                halo_color = QColor("#f59e0b")
+
+            # Route indication is only a small halo around the normal
+            # physical pipe. The pipe itself keeps its original colour.
+            #
+            # Physical pipe = 5 px.
+            # Halo          = 9 px with low opacity.
+            # This leaves only ~2 px of visible glow around each edge.
+            halo_color.setAlpha(70)
+
+            route_pen = QPen(
+                halo_color,
+                9,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.SquareCap,
+                Qt.PenJoinStyle.MiterJoin,
+            )
+
+            supply_port = geometry[
+                "supply_port"
+            ]
+            product_port = geometry[
+                "product_port"
+            ]
+
+            # Use exactly the same endpoints as the real process pipe.
+            # The halo is painted before the tank pixmap, so the equipment
+            # image hides the internal/covered part exactly as it does for
+            # the normal blue process line.
+            outlet_y = (
+                right_section_y
+                if tank_id in (
+                    "01-TK1C",
+                    "01-TK1D",
+                )
+                else return_y
+            )
+
+            paths: list[
+                tuple[QPointF, QPointF]
+            ] = []
+
+            if operation == "RECEIVE":
+                paths.extend((
+                    (
+                        QPointF(
+                            milk_inlet_x,
+                            61.0,
+                        ),
+                        QPointF(
+                            milk_inlet_x,
+                            supply_y,
+                        ),
+                    ),
+                    (
+                        QPointF(
+                            milk_inlet_x,
+                            supply_y,
+                        ),
+                        QPointF(
+                            supply_port.x(),
+                            supply_y,
+                        ),
+                    ),
+                    (
+                        QPointF(
+                            supply_port.x(),
+                            supply_y,
+                        ),
+                        supply_port,
+                    ),
+                ))
+
+            elif operation == "CIP":
+                if tank_id in (
+                    "01-TK1A",
+                    "01-TK1B",
+                ):
+                    paths.extend((
+                        (
+                            QPointF(
+                                155.0,
+                                supply_y,
+                            ),
+                            QPointF(
+                                supply_port.x(),
+                                supply_y,
+                            ),
+                        ),
+                        (
+                            QPointF(
+                                supply_port.x(),
+                                supply_y,
+                            ),
+                            supply_port,
+                        ),
+                        (
+                            product_port,
+                            QPointF(
+                                product_port.x(),
+                                return_y,
+                            ),
+                        ),
+                        (
+                            QPointF(
+                                product_port.x(),
+                                return_y,
+                            ),
+                            QPointF(
+                                section_a_cip_valve_x
+                                + 58.0,
+                                return_y,
+                            ),
+                        ),
+                    ))
+                else:
+                    paths.extend((
+                        (
+                            QPointF(
+                                1540.0,
+                                supply_y,
+                            ),
+                            QPointF(
+                                supply_port.x(),
+                                supply_y,
+                            ),
+                        ),
+                        (
+                            QPointF(
+                                supply_port.x(),
+                                supply_y,
+                            ),
+                            supply_port,
+                        ),
+                        (
+                            product_port,
+                            QPointF(
+                                product_port.x(),
+                                right_section_y,
+                            ),
+                        ),
+                        (
+                            QPointF(
+                                product_port.x(),
+                                right_section_y,
+                            ),
+                            QPointF(
+                                1486.0,
+                                right_section_y,
+                            ),
+                        ),
+                    ))
+
+            elif (
+                operation
+                == "TRANSFER_TO_PASTEURIZATION"
+            ):
+                paths.append((
+                    product_port,
+                    QPointF(
+                        product_port.x(),
+                        outlet_y,
+                    ),
+                ))
+
+                if tank_id in (
+                    "01-TK1A",
+                    "01-TK1B",
+                ):
+                    paths.append((
+                        QPointF(
+                            product_port.x(),
+                            return_y,
+                        ),
+                        QPointF(
+                            suction_port.x(),
+                            return_y,
+                        ),
+                    ))
+                else:
+                    paths.extend((
+                        (
+                            QPointF(
+                                product_port.x(),
+                                right_section_y,
+                            ),
+                            QPointF(
+                                270.0,
+                                right_section_y,
+                            ),
+                        ),
+                        (
+                            QPointF(
+                                270.0,
+                                right_section_y,
+                            ),
+                            QPointF(
+                                270.0,
+                                return_y,
+                            ),
+                        ),
+                        (
+                            QPointF(
+                                270.0,
+                                return_y,
+                            ),
+                            QPointF(
+                                suction_port.x(),
+                                return_y,
+                            ),
+                        ),
+                    ))
+
+                paths.append((
+                    QPointF(
+                        discharge_port.x(),
+                        discharge_port.y(),
+                    ),
+                    QPointF(
+                        discharge_port.x(),
+                        pasteurization_top_y,
+                    ),
+                ))
+
+            painter.setPen(
+                route_pen
+            )
+
+            for start, end in paths:
+                painter.drawLine(
+                    start,
+                    end,
+                )
+
+            # Restore the original physical pipe in the centre.
+            # The only visible route indication is therefore the narrow
+            # blue/purple halo around it.
+            physical_core_pen = QPen(
+                self.BLUE,
+                5,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.SquareCap,
+                Qt.PenJoinStyle.MiterJoin,
+            )
+            painter.setPen(
+                physical_core_pen
+            )
+
+            for start, end in paths:
+                painter.drawLine(
+                    start,
+                    end,
+                )
+
     @staticmethod
     def _draw_arrow(
         painter: QPainter,
@@ -2672,6 +3846,12 @@ class MilkStorageCanvas(QWidget):
             event.position()
         )
 
+        if self._milk_reception_hit_rect.contains(
+            design_point
+        ):
+            self.milk_reception_clicked.emit()
+            return
+
         for (
             valve_id,
             item,
@@ -2727,7 +3907,16 @@ class MilkStorageCanvas(QWidget):
             for rect in self._tank_rects.values()
         )
 
-        if over_tank:
+        over_reception = (
+            self._milk_reception_hit_rect.contains(
+                design_point
+            )
+        )
+
+        if (
+            over_tank
+            or over_reception
+        ):
             self.setCursor(
                 Qt.CursorShape.PointingHandCursor
             )
@@ -2794,6 +3983,8 @@ class MilkStoragePage(QWidget):
     valve_command_requested = Signal(str, str)
     pump_command_requested = Signal(str, str)
     control_mode_requested = Signal(str, str)
+    agitator_requested = Signal(str, bool)
+    transfer_requested = Signal(str, str)
     cip_requested = Signal(str)
 
     TANK_IDS = (
@@ -2864,6 +4055,8 @@ class MilkStoragePage(QWidget):
             str,
         ] = {}
 
+        self._runtime = None
+
         self.setStyleSheet("""
             QWidget#MilkStoragePage {
                 background: #ffffff;
@@ -2897,44 +4090,94 @@ class MilkStoragePage(QWidget):
                 border-radius: 7px;
             }
 
-            QLabel {
+            /*
+             * IMPORTANT:
+             * Do not style every QLabel / QRadioButton / QPushButton below
+             * MilkStoragePage. ValveItem owns a native popup window, and
+             * global light-theme colours made that popup unreadable when
+             * macOS was in dark mode.
+             *
+             * Scope the SCADA styling only to widgets we own here. The valve
+             * popup is then rendered by Qt using the current system palette,
+             * so it stays readable in both light and dark appearances.
+             */
+            QFrame#TankDetailPanel QLabel,
+            QFrame#PumpPopup QLabel {
                 color: #334155;
                 background: transparent;
                 font-size: 10px;
             }
 
-
-            QLabel#DetailTitle,
-            QLabel#PopupTitle {
+            QFrame#TankDetailPanel QLabel#DetailTitle,
+            QFrame#PumpPopup QLabel#PopupTitle {
                 color: #17324d;
                 font-size: 12px;
                 font-weight: 700;
             }
 
-            QLabel#SectionTitle {
+            QFrame#TankDetailPanel QLabel#SectionTitle {
                 color: #17324d;
                 font-size: 11px;
                 font-weight: 700;
             }
 
-            QLabel#ValueLabel {
+            QFrame#TankDetailPanel QLabel#ValueLabel {
                 color: #17324d;
                 font-weight: 600;
             }
 
-            QLabel#HintLabel {
+            QFrame#TankDetailPanel QLabel#HintLabel {
                 color: #718197;
                 font-size: 9px;
             }
 
-            QRadioButton {
+            QFrame#TankDetailPanel QLabel#RoutingHintLabel {
+                color: #718197;
+                font-size: 8px;
+            }
+
+            QFrame#TankDetailPanel QRadioButton,
+            QFrame#PumpPopup QRadioButton {
                 color: #334155;
                 background: transparent;
                 font-size: 10px;
                 spacing: 5px;
             }
 
-            QPushButton {
+            /*
+             * TankDetailPanel is always a light SCADA card even when macOS
+             * uses Dark appearance. Therefore its buttons must have their
+             * complete palette defined here; otherwise Qt can inherit dark
+             * system button colours and the widgets become effectively
+             * invisible on the white card.
+             */
+            QFrame#TankDetailPanel QPushButton {
+                min-height: 20px;
+                padding: 0px 9px;
+
+                color: #24364a;
+                background: #f8fafc;
+
+                border: 1px solid #c7d1dc;
+                border-radius: 2px;
+            }
+
+            QFrame#TankDetailPanel QPushButton:hover {
+                background: #eef3f7;
+                border-color: #8fa3b8;
+            }
+
+            QFrame#TankDetailPanel QPushButton:pressed {
+                background: #e3eaf0;
+            }
+
+            QFrame#TankDetailPanel QPushButton:disabled {
+                color: #9aa7b4;
+                background: #f3f5f7;
+                border-color: #d4dbe3;
+            }
+
+            QFrame#PumpPopup QPushButton {
                 min-height: 24px;
                 padding: 2px 9px;
             }
@@ -3002,6 +4245,9 @@ class MilkStoragePage(QWidget):
         # Match the shared Legend + Recent Events panel:
         # same bottom/edge spacing and, most importantly, the same height.
         # Width and all internal content stay unchanged.
+        # Keep the Milk Storage detail card the same height as the shared
+        # Legend / Recent Events card. The action buttons fit in 150 px; the
+        # previous problem was their palette/style, not clipping.
         self.detail_panel.setFixedHeight(150)
 
         bottom.addWidget(
@@ -3016,6 +4262,7 @@ class MilkStoragePage(QWidget):
         reserve.setObjectName(
             "SharedInfoReserve"
         )
+        # Match the original 500 px shared InfoPanel plus a 10 px gap.
         reserve.setFixedWidth(510)
         reserve.setStyleSheet(
             "background: transparent;"
@@ -3037,6 +4284,9 @@ class MilkStoragePage(QWidget):
 
         self.canvas.tank_selected.connect(
             self._select_tank
+        )
+        self.canvas.milk_reception_clicked.connect(
+            self._open_milk_reception_dialog
         )
         self.canvas.valve_selected.connect(
             self._valve_clicked
@@ -3062,7 +4312,10 @@ class MilkStoragePage(QWidget):
             self._mode_requested
         )
         self.detail_panel.agitator_requested.connect(
-            self.set_agitator_running
+            self.agitator_requested
+        )
+        self.detail_panel.transfer_requested.connect(
+            self.transfer_requested
         )
         self.detail_panel.cip_requested.connect(
             self.cip_requested
@@ -3162,21 +4415,8 @@ class MilkStoragePage(QWidget):
         if valve is None:
             return
 
-        valve.set_command(
-            command
-        )
-
-        # Keep the reusable UI component in sync with the requested command
-        # while preserving the current feedback state and interlock.
-        self.canvas.set_valve_state(
-            valve_id,
-            valve.state,
-            valve.command,
-            valve.interlock,
-        )
-
-        # Forward the request to the next layer:
-        # simulator now / real controller or PLC integration later.
+        # Never update state/command optimistically in the UI.
+        # The Valve equipment model may reject the command.
         self.valve_command_requested.emit(
             valve_id,
             command,
@@ -3187,19 +4427,9 @@ class MilkStoragePage(QWidget):
         object_id: str,
         mode: str,
     ) -> None:
-        valve = self._valves.get(
-            object_id
-        )
-
-        if valve is not None:
-            valve.set_mode(
-                mode
-            )
-            self.canvas.set_valve_mode(
-                object_id,
-                mode,
-            )
-        else:
+        # Mode is process state too. Send the request and wait for the
+        # accepted mode to return in the runtime snapshot.
+        if object_id not in self._valves:
             self._object_modes[
                 object_id
             ] = mode
@@ -3207,6 +4437,293 @@ class MilkStoragePage(QWidget):
         self.control_mode_requested.emit(
             object_id,
             mode,
+        )
+
+    def _open_milk_reception_dialog(
+        self,
+    ) -> None:
+        if self._runtime is None:
+            return
+
+        dialog = MilkReceptionDialog(
+            tank_data=self._tank_data,
+            selected_tank_id=(
+                self.detail_panel
+                .selected_tank_id
+            ),
+            parent=self,
+        )
+
+        if (
+            dialog.exec()
+            != QDialog.DialogCode.Accepted
+        ):
+            return
+
+        tank_id = dialog.selected_tank_id
+
+        if dialog.command == "STOP":
+            accepted, reason = (
+                self._runtime.execute(
+                    target_id=tank_id,
+                    action="STOP_RECEPTION",
+                )
+            )
+        else:
+            accepted, reason = (
+                self._runtime.execute(
+                    target_id=tank_id,
+                    action="START_RECEPTION",
+                    value=(
+                        dialog.delivery_volume_l
+                    ),
+                )
+            )
+
+        if not accepted:
+            QMessageBox.warning(
+                self,
+                "Milk Reception",
+                reason
+                or "Reception request was rejected.",
+            )
+
+    # --------------------------------------------------------
+    # Central process runtime
+    # --------------------------------------------------------
+
+    def bind_runtime(
+        self,
+        runtime,
+    ) -> None:
+        """
+        Connect this page to the one shared ProcessRuntime.
+        """
+        if self._runtime is runtime:
+            return
+
+        if self._runtime is not None:
+            raise RuntimeError(
+                "MilkStoragePage is already bound to a runtime."
+            )
+
+        self._runtime = runtime
+
+        runtime.snapshot_updated.connect(
+            self.update_from_snapshot
+        )
+
+        self.transfer_requested.connect(
+            self._runtime_transfer_requested
+        )
+        self.cip_requested.connect(
+            self._runtime_cip_requested
+        )
+        self.valve_command_requested.connect(
+            self._runtime_valve_requested
+        )
+        self.pump_command_requested.connect(
+            self._runtime_pump_requested
+        )
+        self.agitator_requested.connect(
+            self._runtime_agitator_requested
+        )
+        self.control_mode_requested.connect(
+            self._runtime_mode_requested
+        )
+
+        self.update_from_snapshot(
+            runtime.snapshot()
+        )
+
+    def update_from_snapshot(
+        self,
+        snapshot: Mapping[str, Any],
+    ) -> None:
+        self.canvas.set_active_routes(
+            snapshot.get(
+                "active_routes",
+                (),
+            )
+        )
+
+        for (
+            tank_id,
+            data,
+        ) in snapshot.get(
+            "tanks",
+            {},
+        ).items():
+            if tank_id in self.TANK_IDS:
+                self.set_tank_data(
+                    tank_id,
+                    data,
+                )
+
+        for (
+            valve_id,
+            data,
+        ) in snapshot.get(
+            "valves",
+            {},
+        ).items():
+            if valve_id not in self._valves:
+                continue
+
+            self.set_valve_state(
+                valve_id=valve_id,
+                state=str(
+                    data.get(
+                        "state",
+                        "UNKNOWN",
+                    )
+                ),
+                command=data.get(
+                    "command"
+                ),
+                interlock=(
+                    data.get(
+                        "interlock"
+                    )
+                    or (
+                        "FAULT"
+                        if data.get(
+                            "fault",
+                            False,
+                        )
+                        else None
+                    )
+                ),
+            )
+
+            mode = str(
+                data.get(
+                    "mode",
+                    "AUTO",
+                )
+            ).upper()
+
+            self._object_modes[
+                valve_id
+            ] = mode
+
+            self.canvas.set_valve_mode(
+                valve_id,
+                mode,
+            )
+
+        for (
+            pump_id,
+            data,
+        ) in snapshot.get(
+            "pumps",
+            {},
+        ).items():
+            if pump_id != "01-PM1":
+                continue
+
+            self.set_pump_state(
+                pump_id=pump_id,
+                state=str(
+                    data.get(
+                        "state",
+                        "UNKNOWN",
+                    )
+                ),
+                command=data.get(
+                    "command"
+                ),
+                interlock=(
+                    "FAULT"
+                    if data.get(
+                        "fault",
+                        False,
+                    )
+                    else None
+                ),
+            )
+
+    def _runtime_transfer_requested(
+        self,
+        tank_id: str,
+        command: str,
+    ) -> None:
+        if self._runtime is None:
+            return
+
+        self._runtime.execute(
+            target_id=tank_id,
+            action=(
+                "START_TRANSFER"
+                if command == "START"
+                else "STOP_TRANSFER"
+            ),
+        )
+
+    def _runtime_cip_requested(
+        self,
+        tank_id: str,
+    ) -> None:
+        if self._runtime is None:
+            return
+
+        self._runtime.execute(
+            target_id=tank_id,
+            action="START_CIP",
+        )
+
+    def _runtime_valve_requested(
+        self,
+        valve_id: str,
+        command: str,
+    ) -> None:
+        if self._runtime is None:
+            return
+
+        self._runtime.execute(
+            target_id=valve_id,
+            action=command,
+        )
+
+    def _runtime_pump_requested(
+        self,
+        pump_id: str,
+        command: str,
+    ) -> None:
+        if self._runtime is None:
+            return
+
+        self._runtime.execute(
+            target_id=pump_id,
+            action=command,
+        )
+
+    def _runtime_agitator_requested(
+        self,
+        tank_id: str,
+        running: bool,
+    ) -> None:
+        if self._runtime is None:
+            return
+
+        self._runtime.execute(
+            target_id=tank_id,
+            action="AGITATOR",
+            value=running,
+        )
+
+    def _runtime_mode_requested(
+        self,
+        object_id: str,
+        mode: str,
+    ) -> None:
+        if self._runtime is None:
+            return
+
+        self._runtime.execute(
+            target_id=object_id,
+            action="SET_MODE",
+            value=mode,
         )
 
     # --------------------------------------------------------
@@ -3246,6 +4763,35 @@ class MilkStoragePage(QWidget):
                     "volume_l"
                 ),
             ),
+            "nominal_capacity_l": data.get(
+                "nominal_capacity_l"
+            ),
+            "working_capacity_l": data.get(
+                "working_capacity_l"
+            ),
+            "free_working_volume_l": data.get(
+                "free_working_volume_l"
+            ),
+            "reception_active": data.get(
+                "reception_active",
+                False,
+            ),
+            "reception_permissive": data.get(
+                "reception_permissive",
+                False,
+            ),
+            "reception_inhibit_reason": data.get(
+                "reception_inhibit_reason"
+            ),
+            "reception_requested_l": data.get(
+                "reception_requested_l"
+            ),
+            "reception_received_l": data.get(
+                "reception_received_l"
+            ),
+            "reception_remaining_l": data.get(
+                "reception_remaining_l"
+            ),
             "temperature_c": data.get(
                 "temperature_c",
                 actuals.get(
@@ -3258,11 +4804,25 @@ class MilkStoragePage(QWidget):
                     "storage_time_s"
                 ),
             ),
+            "agitator_mode": data.get(
+                "agitator_mode",
+                "AUTO",
+            ),
             "agitator_running": data.get(
                 "agitator_running",
                 storage_actuals.get(
                     "agitator_running"
                 ),
+            ),
+            "agitator_interlock": data.get(
+                "agitator_interlock"
+            ),
+            "agitator_start_permissive": data.get(
+                "agitator_start_permissive",
+                False,
+            ),
+            "agitator_inhibit_reason": data.get(
+                "agitator_inhibit_reason"
             ),
             "agitator_speed_rpm": data.get(
                 "agitator_speed_rpm",
@@ -3275,6 +4835,23 @@ class MilkStoragePage(QWidget):
             ),
             "active_route": data.get(
                 "active_route"
+            ),
+            "transfer_active": data.get(
+                "transfer_active",
+                False,
+            ),
+            "transfer_permissive": data.get(
+                "transfer_permissive",
+                False,
+            ),
+            "transfer_inhibit_reason": data.get(
+                "transfer_inhibit_reason"
+            ),
+            "route_state": data.get(
+                "route_state"
+            ),
+            "route_fault": data.get(
+                "route_fault"
             ),
             "cip_state": data.get(
                 "cip_state"

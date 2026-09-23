@@ -72,6 +72,8 @@ class InfoPanel(QFrame):
         self.event_logger = event_logger
 
         self.setObjectName("SharedInfoPanel")
+        # Original shared-panel geometry. Long event text is handled by
+        # word wrapping and the dynamic height-aware event list below.
         self.setFixedSize(500, 150)
 
         self.setStyleSheet("""
@@ -96,7 +98,7 @@ class InfoPanel(QFrame):
 
             QLabel#EventLine {
                 color: #52647a;
-                font-size: 10px;
+                font-size: 9px;
             }
         """)
 
@@ -136,7 +138,7 @@ class InfoPanel(QFrame):
         )
         legend_layout.addWidget(
             LegendRow(
-                "#8147c6",
+                "#7e40c5",
                 "CIP",
             )
         )
@@ -161,7 +163,7 @@ class InfoPanel(QFrame):
 
         events_layout = QVBoxLayout(events)
         events_layout.setContentsMargins(0, 0, 0, 0)
-        events_layout.setSpacing(2)
+        events_layout.setSpacing(0)
 
         events_title = QLabel("Recent Events")
         events_title.setObjectName("PanelTitle")
@@ -169,16 +171,29 @@ class InfoPanel(QFrame):
 
         self.event_labels = []
 
-        for _ in range(6):
+        # Keep enough reusable rows for the whole panel.
+        # refresh_events() decides dynamically how many events actually fit.
+        for _ in range(10):
             label = QLabel("")
             label.setObjectName("EventLine")
+            label.setWordWrap(True)
+            label.setAlignment(
+                Qt.AlignmentFlag.AlignLeft
+                | Qt.AlignmentFlag.AlignTop
+            )
             label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.NoTextInteraction
             )
+            label.hide()
             self.event_labels.append(label)
             events_layout.addWidget(label)
 
-        events_layout.addStretch()
+        # Empty space stays BELOW the events while the list is filling.
+        # Once the available height is filled, new events replace the oldest.
+        events_layout.addStretch(1)
+
+        self._events_widget = events
+        self._events_title = events_title
 
         root.addWidget(legend)
         root.addWidget(separator)
@@ -198,21 +213,113 @@ class InfoPanel(QFrame):
         if self.event_logger is None:
             events = []
         else:
-            events = self.event_logger.recent(6)
+            # Ask for more than can normally fit. We then keep the newest
+            # events whose rendered height fits inside the panel.
+            events = self.event_logger.recent(
+                len(self.event_labels)
+            )
 
-        for label in self.event_labels:
-            label.clear()
+        formatted = []
 
-        for label, event in zip(
-            self.event_labels,
-            events,
-        ):
+        for event in events:
             timestamp = event["time"].strftime(
                 "%H:%M:%S"
             )
             category = event["category"]
             message = event["message"]
 
-            label.setText(
+            formatted.append(
                 f"{timestamp}  [{category}]  {message}"
             )
+
+        # Available vertical space below the title.
+        # During the very first layout pass Qt may still report zero sizes,
+        # so use the known fixed-panel geometry as a safe fallback.
+        events_height = (
+            self._events_widget.height()
+            if self._events_widget.height() > 20
+            else 130
+        )
+
+        title_height = max(
+            self._events_title.sizeHint().height(),
+            16,
+        )
+
+        available_height = max(
+            20,
+            events_height
+            - title_height
+            - 2,
+        )
+
+        text_width = (
+            self._events_widget.width()
+            if self._events_widget.width() > 80
+            else 430
+        )
+
+        # Build the visible list from newest backwards. This means the panel
+        # first grows DOWNWARD. Only after it reaches the bottom do new
+        # events push the oldest visible event out.
+        selected_reversed = []
+        used_height = 0
+
+        measure_label = self.event_labels[0]
+        metrics = measure_label.fontMetrics()
+
+        for full_text in reversed(formatted):
+            rect = metrics.boundingRect(
+                0,
+                0,
+                max(80, text_width),
+                1000,
+                int(
+                    Qt.TextFlag.TextWordWrap
+                    | Qt.TextFlag.TextExpandTabs
+                ),
+                full_text,
+            )
+
+            line_height = max(
+                metrics.height(),
+                rect.height(),
+            )
+
+            if (
+                selected_reversed
+                and (
+                    used_height
+                    + line_height
+                    > available_height
+                )
+            ):
+                break
+
+            selected_reversed.append(
+                full_text
+            )
+            used_height += line_height
+
+        selected = list(
+            reversed(
+                selected_reversed
+            )
+        )
+
+        for label in self.event_labels:
+            label.clear()
+            label.setToolTip("")
+            label.hide()
+
+        for label, full_text in zip(
+            self.event_labels,
+            selected,
+        ):
+            label.setText(
+                full_text
+            )
+            label.setToolTip(
+                full_text
+            )
+            label.show()

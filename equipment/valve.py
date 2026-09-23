@@ -1,103 +1,249 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from enum import StrEnum
+from typing import Iterable
 
 
-VALID_STATES = {
-    "UNKNOWN",
-    "CLOSED",
-    "OPENING",
-    "OPEN",
-    "CLOSING",
-    "FAULT",
-}
-
-VALID_COMMANDS = {
-    "OPEN",
-    "CLOSE",
-}
-
-VALID_MODES = {
-    "AUTO",
-    "MANUAL",
-}
+class ValveMode(StrEnum):
+    AUTO = "AUTO"
+    MANUAL = "MANUAL"
 
 
-@dataclass(slots=True)
+class ValveState(StrEnum):
+    CLOSED = "CLOSED"
+    OPENING = "OPENING"
+    OPEN = "OPEN"
+    CLOSING = "CLOSING"
+    FAULT = "FAULT"
+    UNKNOWN = "UNKNOWN"
+
+
+class ValveCommand(StrEnum):
+    CLOSE = "CLOSE"
+    OPEN = "OPEN"
+
+
 class Valve:
     """
-    Process-level valve model.
+    Generic process-valve equipment model.
 
-    This class contains no PySide6/UI code and does not care whether its
-    values come from the simulator, a PLC, OPC UA, Modbus, or another
-    process-data provider.
+    Route automation only declares the state required by an active route.
+    The Valve itself owns MANUAL permissives/interlocks and decides whether
+    an operator OPEN/CLOSE request may be accepted.
 
-    Important:
-    changing ``command`` does not change ``state``.  The actual state must
-    come back from the process/provider as feedback.
+    Simulation is not part of this decision. It only simulates movement
+    after an already accepted command.
     """
 
-    equipment_id: str
-    description: str = ""
+    def __init__(
+        self,
+        equipment_id: str,
+        description: str = "Process valve",
+    ):
+        self.equipment_id = str(equipment_id)
+        self.description = str(description)
 
-    state: str = "UNKNOWN"
-    command: str | None = None
-    mode: str = "AUTO"
-    interlock: str | None = None
+        self.state = ValveState.CLOSED.value
+        self.command = ValveCommand.CLOSE.value
+        self.mode = ValveMode.AUTO.value
+
+        self._process_interlock: str | None = None
+        self._route_requirements: dict[str, str] = {}
+
+    def set_mode(
+        self,
+        mode: ValveMode | str,
+    ) -> tuple[bool, str | None]:
+        try:
+            normalized = ValveMode(
+                str(mode).upper()
+            )
+        except ValueError:
+            return (
+                False,
+                f"Unsupported valve mode: {mode}.",
+            )
+
+        # AUTO/MANUAL selection must never move the valve.
+        self.mode = normalized.value
+        return True, None
+
+    def set_route_requirements(
+        self,
+        requirements: Iterable[
+            tuple[str, str]
+        ],
+    ) -> None:
+        normalized: dict[str, str] = {}
+
+        for required_state, owner in requirements:
+            state = str(required_state).upper()
+
+            if state not in (
+                ValveState.OPEN.value,
+                ValveState.CLOSED.value,
+            ):
+                raise ValueError(
+                    "Route valve requirement must be "
+                    "OPEN or CLOSED."
+                )
+
+            normalized[str(owner)] = state
+
+        self._route_requirements = normalized
+
+    @property
+    def required_route_state(
+        self,
+    ) -> str | None:
+        states = set(
+            self._route_requirements.values()
+        )
+
+        if len(states) == 1:
+            return next(iter(states))
+
+        return None
+
+    @property
+    def route_owners(
+        self,
+    ) -> tuple[str, ...]:
+        return tuple(
+            self._route_requirements.keys()
+        )
+
+    @property
+    def route_interlock(
+        self,
+    ) -> str | None:
+        if not self._route_requirements:
+            return None
+
+        states = set(
+            self._route_requirements.values()
+        )
+
+        if len(states) > 1:
+            return (
+                "Conflicting route requirements: "
+                + ", ".join(self.route_owners)
+            )
+
+        required = next(iter(states))
+
+        return (
+            f"Required {required} by "
+            + ", ".join(self.route_owners)
+        )
+
+    def request_manual_command(
+        self,
+        command: ValveCommand | str,
+    ) -> tuple[bool, str | None]:
+        try:
+            requested = ValveCommand(
+                str(command).upper()
+            ).value
+        except ValueError:
+            return (
+                False,
+                f"Unsupported valve command: {command}.",
+            )
+
+        if self.mode != ValveMode.MANUAL.value:
+            return (
+                False,
+                (
+                    f"{self.equipment_id} is in AUTO. "
+                    "Switch to MANUAL before direct control."
+                ),
+            )
+
+        if self._process_interlock:
+            return False, self._process_interlock
+
+        required = self.required_route_state
+
+        if required is None and len(
+            set(self._route_requirements.values())
+        ) > 1:
+            return (
+                False,
+                self.route_interlock
+                or "Conflicting route requirements.",
+            )
+
+        if (
+            required is not None
+            and requested != required
+        ):
+            owners = ", ".join(
+                self.route_owners
+            )
+            return (
+                False,
+                (
+                    f"{self.equipment_id} must remain "
+                    f"{required} while {owners} is active."
+                ),
+            )
+
+        self.command = requested
+        return True, None
+
+    def accept_automatic_command(
+        self,
+        command: ValveCommand | str,
+    ) -> None:
+        self.command = ValveCommand(
+            str(command).upper()
+        ).value
+
+    # Backward-compatible helper used by older UI code.
+    def set_command(
+        self,
+        command: ValveCommand | str,
+    ) -> None:
+        self.command = ValveCommand(
+            str(command).upper()
+        ).value
 
     def update_process_state(
         self,
-        *,
-        state: str | None = None,
-        command: str | None = None,
+        state: ValveState | str,
+        command: ValveCommand | str | None = None,
         interlock: str | None = None,
     ) -> None:
-        if state is not None:
-            normalized_state = state.upper()
-            self.state = (
-                normalized_state
-                if normalized_state in VALID_STATES
-                else "UNKNOWN"
-            )
+        state_text = str(state).upper()
 
-        if command is None:
-            self.command = None
-        else:
-            normalized_command = command.upper()
-            self.command = (
-                normalized_command
-                if normalized_command in VALID_COMMANDS
-                else normalized_command
-            )
+        if state_text not in {
+            item.value
+            for item in ValveState
+        }:
+            state_text = ValveState.UNKNOWN.value
 
-        self.interlock = interlock
+        self.state = state_text
 
-    def set_mode(self, mode: str) -> None:
-        normalized = mode.upper()
+        if command is not None:
+            command_text = str(command).upper()
+            if command_text in (
+                ValveCommand.OPEN.value,
+                ValveCommand.CLOSE.value,
+            ):
+                self.command = command_text
 
-        if normalized not in VALID_MODES:
-            raise ValueError(
-                f"Unsupported valve mode: {mode!r}"
-            )
+        self._process_interlock = (
+            str(interlock)
+            if interlock
+            else None
+        )
 
-        self.mode = normalized
-
-    def set_command(self, command: str | None) -> None:
-        """
-        Store the requested command only.
-
-        This intentionally does not alter ``state``.  State changes only
-        after process feedback is received.
-        """
-        if command is None:
-            self.command = None
-            return
-
-        normalized = command.upper()
-
-        if normalized not in VALID_COMMANDS:
-            raise ValueError(
-                f"Unsupported valve command: {command!r}"
-            )
-
-        self.command = normalized
+    @property
+    def interlock(
+        self,
+    ) -> str | None:
+        return (
+            self._process_interlock
+            or self.route_interlock
+        )

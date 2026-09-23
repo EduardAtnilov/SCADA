@@ -23,16 +23,32 @@ class AgitatorMode(StrEnum):
     CIP = "CIP"
 
 
+class AgitatorCycle(StrEnum):
+    OFF = "OFF"
+    WAIT_LEVEL = "WAIT_LEVEL"
+    AUTO_RUN = "AUTO_RUN"
+    AUTO_PAUSE = "AUTO_PAUSE"
+    RECEIVING_MIX = "RECEIVING_MIX"
+    FEEDING_MIX = "FEEDING_MIX"
+    PRE_MIX = "PRE_MIX"
+    MANUAL_ON = "MANUAL_ON"
+    MANUAL_OFF = "MANUAL_OFF"
+    CIP_OFF = "CIP_OFF"
+
+
 @dataclass
 class StorageTankActuals:
     """
-    Values specific to raw-milk storage tanks.
+    Values and equipment feedback specific to raw-milk storage tanks.
     """
 
     storage_time_s: int = 0
 
     agitator_running: bool = False
-    agitator_speed_rpm: float = 0.0
+    agitator_speed_rpm: float | None = 0.0
+    agitator_cycle: AgitatorCycle = AgitatorCycle.WAIT_LEVEL
+    agitator_interlock: str | None = None
+    agitator_premix_complete: bool = False
 
     low_level_active: bool = False
     high_level_active: bool = False
@@ -42,10 +58,10 @@ class StorageTankActuals:
 @dataclass
 class StorageTankSetpoints:
     """
-    Storage-tank setpoints.
+    Raw-milk storage-tank setpoints.
 
-    Exact level thresholds, RPM and timing are intentionally left unset
-    until we choose them from real equipment/process documentation.
+    The values themselves are supplied by plant/project configuration.
+    The equipment object owns how those setpoints are applied.
     """
 
     max_storage_temperature_c: float | None = None
@@ -54,22 +70,27 @@ class StorageTankSetpoints:
     high_level_limit_percent: float | None = None
 
     agitator_mode: AgitatorMode = AgitatorMode.AUTO
+    agitator_start_level_percent: float | None = None
     agitator_speed_sp_rpm: float | None = None
-    agitator_run_time_s: int | None = None
-    agitator_pause_time_s: int | None = None
-    agitator_pre_discharge_time_s: int | None = None
+    agitator_run_time_s: float | None = None
+    agitator_pause_time_s: float | None = None
+    agitator_pre_discharge_time_s: float | None = None
 
 
 class StorageTank(Tank):
     """
-    Raw-milk storage tank.
+    Raw-milk storage tank equipment model.
 
-    This is one concrete tank type.
-    Other tank types will get their own classes/files instead of being
-    forced into this model.
+    This class owns the tank-specific control behaviour:
+    - agitator AUTO / MANUAL mode;
+    - safe-level interlock;
+    - intermittent storage mixing;
+    - continuous mixing while receiving / feeding;
+    - pre-discharge mixing.
 
-    The class stores process state and feedback only.
-    It does not execute simulation logic itself.
+    It does NOT know whether its feedback comes from a simulator or a PLC.
+    SimulationEngine only advances process time/physics and supplies current
+    process feedback (level/state/temperature).
     """
 
     def __init__(
@@ -86,10 +107,16 @@ class StorageTank(Tank):
 
         self.state = StorageTankState.EMPTY
 
-        self.storage_actuals = (
-            StorageTankActuals()
-        )
+        self.storage_actuals = StorageTankActuals()
         self.setpoints = StorageTankSetpoints()
+
+        self._agitator_manual_command = False
+        self._agitator_cycle_elapsed_s = 0.0
+        self._agitator_premix_elapsed_s = 0.0
+
+    # =========================================================
+    # External feedback / configuration
+    # =========================================================
 
     def apply_snapshot(
         self,
@@ -110,42 +137,61 @@ class StorageTank(Tank):
                     "storage_time_s cannot be negative."
                 )
 
-            self.storage_actuals.storage_time_s = (
-                value
-            )
+            self.storage_actuals.storage_time_s = value
 
         if "agitator_running" in snapshot:
-            self.storage_actuals.agitator_running = (
-                bool(snapshot["agitator_running"])
+            self.storage_actuals.agitator_running = bool(
+                snapshot["agitator_running"]
             )
 
         if "agitator_speed_rpm" in snapshot:
-            value = float(
-                snapshot["agitator_speed_rpm"]
+            value = snapshot["agitator_speed_rpm"]
+
+            if value is None:
+                self.storage_actuals.agitator_speed_rpm = None
+            else:
+                value = float(value)
+
+                if value < 0:
+                    raise ValueError(
+                        "agitator_speed_rpm cannot be negative."
+                    )
+
+                self.storage_actuals.agitator_speed_rpm = value
+
+        if "agitator_cycle" in snapshot:
+            self.storage_actuals.agitator_cycle = (
+                AgitatorCycle(
+                    snapshot["agitator_cycle"]
+                )
             )
 
-            if value < 0:
-                raise ValueError(
-                    "agitator_speed_rpm cannot be negative."
-                )
+        if "agitator_interlock" in snapshot:
+            value = snapshot["agitator_interlock"]
+            self.storage_actuals.agitator_interlock = (
+                None
+                if value is None
+                else str(value)
+            )
 
-            self.storage_actuals.agitator_speed_rpm = (
-                value
+        if "agitator_premix_complete" in snapshot:
+            self.storage_actuals.agitator_premix_complete = bool(
+                snapshot["agitator_premix_complete"]
             )
 
         if "low_level_active" in snapshot:
-            self.storage_actuals.low_level_active = (
-                bool(snapshot["low_level_active"])
+            self.storage_actuals.low_level_active = bool(
+                snapshot["low_level_active"]
             )
 
         if "high_level_active" in snapshot:
-            self.storage_actuals.high_level_active = (
-                bool(snapshot["high_level_active"])
+            self.storage_actuals.high_level_active = bool(
+                snapshot["high_level_active"]
             )
 
         if "temperature_alarm" in snapshot:
-            self.storage_actuals.temperature_alarm = (
-                bool(snapshot["temperature_alarm"])
+            self.storage_actuals.temperature_alarm = bool(
+                snapshot["temperature_alarm"]
             )
 
     def apply_setpoints(
@@ -184,9 +230,17 @@ class StorageTank(Tank):
             )
 
         if "agitator_mode" in setpoints:
-            self.setpoints.agitator_mode = (
-                AgitatorMode(
-                    setpoints["agitator_mode"]
+            self.set_agitator_mode(
+                setpoints["agitator_mode"]
+            )
+
+        if "agitator_start_level_percent" in setpoints:
+            self.setpoints.agitator_start_level_percent = (
+                self._optional_percent(
+                    setpoints[
+                        "agitator_start_level_percent"
+                    ],
+                    "agitator_start_level_percent",
                 )
             )
 
@@ -196,9 +250,7 @@ class StorageTank(Tank):
             ]
 
             if value is None:
-                self.setpoints.agitator_speed_sp_rpm = (
-                    None
-                )
+                self.setpoints.agitator_speed_sp_rpm = None
             else:
                 value = float(value)
 
@@ -208,9 +260,7 @@ class StorageTank(Tank):
                         "cannot be negative."
                     )
 
-                self.setpoints.agitator_speed_sp_rpm = (
-                    value
-                )
+                self.setpoints.agitator_speed_sp_rpm = value
 
         for field_name in (
             "agitator_run_time_s",
@@ -230,11 +280,11 @@ class StorageTank(Tank):
                 )
                 continue
 
-            value = int(value)
+            value = float(value)
 
-            if value < 0:
+            if value <= 0.0:
                 raise ValueError(
-                    f"{field_name} cannot be negative."
+                    f"{field_name} must be positive."
                 )
 
             setattr(
@@ -243,41 +293,499 @@ class StorageTank(Tank):
                 value,
             )
 
+    # =========================================================
+    # Agitator commands
+    # =========================================================
+
+    def set_agitator_mode(
+        self,
+        mode: AgitatorMode | str,
+    ) -> None:
+        mode = AgitatorMode(mode)
+
+        if mode not in (
+            AgitatorMode.AUTO,
+            AgitatorMode.MANUAL,
+            AgitatorMode.OFF,
+        ):
+            raise ValueError(
+                "Agitator mode must be AUTO, MANUAL or OFF."
+            )
+
+        self.setpoints.agitator_mode = mode
+
+        if mode != AgitatorMode.MANUAL:
+            self._agitator_manual_command = False
+
+    def command_agitator(
+        self,
+        running: bool,
+        *,
+        level_percent: float,
+        state: StorageTankState | str,
+    ) -> tuple[bool, str | None]:
+        """
+        Direct operator command.
+
+        The equipment object itself enforces its interlocks.
+        """
+        if (
+            self.setpoints.agitator_mode
+            != AgitatorMode.MANUAL
+        ):
+            return (
+                False,
+                "Switch the agitator to MANUAL before using ON/OFF.",
+            )
+
+        if not running:
+            self._agitator_manual_command = False
+            return True, None
+
+        permissive, reason = (
+            self.agitator_start_status(
+                level_percent=level_percent,
+                state=state,
+            )
+        )
+
+        if not permissive:
+            return False, reason
+
+        self._agitator_manual_command = True
+        return True, None
+
+    # =========================================================
+    # Equipment behaviour
+    # =========================================================
+
+    def update_control(
+        self,
+        dt_s: float,
+        *,
+        level_percent: float,
+        state: StorageTankState | str,
+        temperature_c: float | None = None,
+        pre_mix_requested: bool = False,
+    ) -> None:
+        """
+        Advance tank-specific control behaviour by dt_s.
+
+        This is deterministic equipment logic, not simulator-specific logic.
+        A simulator can call it with simulated feedback; a real integration
+        can instead apply actual PLC feedback.
+        """
+        dt_s = max(
+            0.0,
+            float(dt_s),
+        )
+        level_percent = float(
+            level_percent
+        )
+        state = self._normalize_state(
+            state
+        )
+        self.state = state
+
+        self._update_process_alarms(
+            level_percent=level_percent,
+            temperature_c=temperature_c,
+        )
+
+        permissive, inhibit_reason = (
+            self.agitator_start_status(
+                level_percent=level_percent,
+                state=state,
+            )
+        )
+
+        self.storage_actuals.agitator_interlock = None
+
+        # CIP always has priority over any agitator request.
+        if state == StorageTankState.CIP:
+            self._agitator_manual_command = False
+            self._reset_pre_mix()
+            self._set_agitator_running(False)
+            self.storage_actuals.agitator_cycle = (
+                AgitatorCycle.CIP_OFF
+            )
+            return
+
+        # Safe-level interlock.
+        if not permissive:
+            self._agitator_manual_command = False
+
+            if pre_mix_requested:
+                self.storage_actuals.agitator_interlock = (
+                    inhibit_reason
+                )
+
+            self._reset_pre_mix()
+            self._set_agitator_running(False)
+            self.storage_actuals.agitator_cycle = (
+                AgitatorCycle.WAIT_LEVEL
+            )
+            self._agitator_cycle_elapsed_s = 0.0
+            return
+
+        # Automatic pre-discharge mixing requested by process automation.
+        if pre_mix_requested:
+            if (
+                self.setpoints.agitator_mode
+                != AgitatorMode.AUTO
+            ):
+                self.storage_actuals.agitator_interlock = (
+                    "Agitator must be in AUTO for pre-mix."
+                )
+                self._set_agitator_running(False)
+                self.storage_actuals.agitator_cycle = (
+                    AgitatorCycle.MANUAL_OFF
+                )
+                return
+
+            self._set_agitator_running(True)
+            self.storage_actuals.agitator_cycle = (
+                AgitatorCycle.PRE_MIX
+            )
+
+            self._agitator_premix_elapsed_s += (
+                dt_s
+            )
+
+            duration = (
+                self.setpoints
+                .agitator_pre_discharge_time_s
+            )
+
+            self.storage_actuals.agitator_premix_complete = (
+                duration is not None
+                and (
+                    self._agitator_premix_elapsed_s
+                    >= duration
+                )
+            )
+            return
+
+        # No current pre-mix request: clear its latched progress/result.
+        self._reset_pre_mix()
+
+        mode = self.setpoints.agitator_mode
+
+        if mode == AgitatorMode.OFF:
+            self._set_agitator_running(False)
+            self.storage_actuals.agitator_cycle = (
+                AgitatorCycle.OFF
+            )
+            self._agitator_cycle_elapsed_s = 0.0
+            return
+
+        if mode == AgitatorMode.MANUAL:
+            self._set_agitator_running(
+                self._agitator_manual_command
+            )
+            self.storage_actuals.agitator_cycle = (
+                AgitatorCycle.MANUAL_ON
+                if self.storage_actuals.agitator_running
+                else AgitatorCycle.MANUAL_OFF
+            )
+            self._agitator_cycle_elapsed_s = 0.0
+            return
+
+        # AUTO mode.
+        if state == StorageTankState.RECEIVING:
+            self._set_agitator_running(True)
+            self.storage_actuals.agitator_cycle = (
+                AgitatorCycle.RECEIVING_MIX
+            )
+            self._agitator_cycle_elapsed_s = 0.0
+            return
+
+        if state == StorageTankState.FEEDING:
+            self._set_agitator_running(True)
+            self.storage_actuals.agitator_cycle = (
+                AgitatorCycle.FEEDING_MIX
+            )
+            self._agitator_cycle_elapsed_s = 0.0
+            return
+
+        if state != StorageTankState.STORING:
+            self._set_agitator_running(False)
+            self.storage_actuals.agitator_cycle = (
+                AgitatorCycle.WAIT_LEVEL
+            )
+            self._agitator_cycle_elapsed_s = 0.0
+            return
+
+        self._update_auto_storage_cycle(
+            dt_s
+        )
+
+    def agitator_start_status(
+        self,
+        *,
+        level_percent: float,
+        state: StorageTankState | str,
+    ) -> tuple[bool, str | None]:
+        state = self._normalize_state(
+            state
+        )
+
+        if state == StorageTankState.CIP:
+            return (
+                False,
+                "Agitator start is blocked while CIP is active.",
+            )
+
+        start_level = (
+            self.setpoints
+            .agitator_start_level_percent
+        )
+
+        if start_level is None:
+            return (
+                False,
+                "Agitator start level is not configured.",
+            )
+
+        if float(level_percent) < start_level:
+            return (
+                False,
+                (
+                    "Agitator start requires level "
+                    f">= {start_level:.0f}%."
+                ),
+            )
+
+        return True, None
+
+    def control_data(
+        self,
+        *,
+        level_percent: float,
+        state: StorageTankState | str,
+    ) -> dict[str, Any]:
+        permissive, inhibit_reason = (
+            self.agitator_start_status(
+                level_percent=level_percent,
+                state=state,
+            )
+        )
+
+        return {
+            "agitator_mode": (
+                self.setpoints
+                .agitator_mode
+                .value
+            ),
+            "agitator_running": (
+                self.storage_actuals
+                .agitator_running
+            ),
+            "agitator_speed_rpm": (
+                self.storage_actuals
+                .agitator_speed_rpm
+            ),
+            "agitator_cycle": (
+                self.storage_actuals
+                .agitator_cycle
+                .value
+            ),
+            "agitator_interlock": (
+                self.storage_actuals
+                .agitator_interlock
+            ),
+            "agitator_start_permissive": (
+                permissive
+            ),
+            "agitator_inhibit_reason": (
+                inhibit_reason
+            ),
+            "agitator_premix_required": (
+                permissive
+            ),
+            "agitator_premix_complete": (
+                self.storage_actuals
+                .agitator_premix_complete
+            ),
+        }
+
+    # =========================================================
+    # Internal helpers
+    # =========================================================
+
+    def _update_auto_storage_cycle(
+        self,
+        dt_s: float,
+    ) -> None:
+        run_time = (
+            self.setpoints
+            .agitator_run_time_s
+        )
+        pause_time = (
+            self.setpoints
+            .agitator_pause_time_s
+        )
+
+        if (
+            run_time is None
+            or pause_time is None
+        ):
+            self.storage_actuals.agitator_interlock = (
+                "Agitator AUTO cycle is not configured."
+            )
+            self._set_agitator_running(False)
+            self.storage_actuals.agitator_cycle = (
+                AgitatorCycle.OFF
+            )
+            self._agitator_cycle_elapsed_s = 0.0
+            return
+
+        if (
+            self.storage_actuals.agitator_cycle
+            not in (
+                AgitatorCycle.AUTO_RUN,
+                AgitatorCycle.AUTO_PAUSE,
+            )
+        ):
+            self.storage_actuals.agitator_cycle = (
+                AgitatorCycle.AUTO_RUN
+            )
+            self._agitator_cycle_elapsed_s = 0.0
+
+        self._agitator_cycle_elapsed_s += (
+            dt_s
+        )
+
+        if (
+            self.storage_actuals.agitator_cycle
+            == AgitatorCycle.AUTO_RUN
+        ):
+            self._set_agitator_running(True)
+
+            if (
+                self._agitator_cycle_elapsed_s
+                >= run_time
+            ):
+                self.storage_actuals.agitator_cycle = (
+                    AgitatorCycle.AUTO_PAUSE
+                )
+                self._agitator_cycle_elapsed_s = 0.0
+                self._set_agitator_running(False)
+
+        else:
+            self._set_agitator_running(False)
+
+            if (
+                self._agitator_cycle_elapsed_s
+                >= pause_time
+            ):
+                self.storage_actuals.agitator_cycle = (
+                    AgitatorCycle.AUTO_RUN
+                )
+                self._agitator_cycle_elapsed_s = 0.0
+                self._set_agitator_running(True)
+
+    def _update_process_alarms(
+        self,
+        *,
+        level_percent: float,
+        temperature_c: float | None,
+    ) -> None:
+        low_limit = (
+            self.setpoints
+            .low_level_limit_percent
+        )
+        high_limit = (
+            self.setpoints
+            .high_level_limit_percent
+        )
+        max_temp = (
+            self.setpoints
+            .max_storage_temperature_c
+        )
+
+        self.storage_actuals.low_level_active = (
+            (
+                float(level_percent)
+                <= low_limit
+            )
+            if low_limit is not None
+            else float(level_percent) <= 0.0
+        )
+
+        self.storage_actuals.high_level_active = (
+            (
+                float(level_percent)
+                >= high_limit
+            )
+            if high_limit is not None
+            else False
+        )
+
+        self.storage_actuals.temperature_alarm = (
+            (
+                temperature_c is not None
+                and max_temp is not None
+                and float(temperature_c)
+                > max_temp
+            )
+        )
+
+    def _set_agitator_running(
+        self,
+        running: bool,
+    ) -> None:
+        self.storage_actuals.agitator_running = bool(
+            running
+        )
+
+        if running:
+            self.storage_actuals.agitator_speed_rpm = (
+                self.setpoints
+                .agitator_speed_sp_rpm
+            )
+        else:
+            self.storage_actuals.agitator_speed_rpm = 0.0
+
+    def _reset_pre_mix(self) -> None:
+        self._agitator_premix_elapsed_s = 0.0
+        self.storage_actuals.agitator_premix_complete = (
+            False
+        )
+
+    @staticmethod
+    def _normalize_state(
+        state: StorageTankState | str,
+    ) -> StorageTankState:
+        if isinstance(
+            state,
+            StorageTankState,
+        ):
+            return state
+
+        return StorageTankState(
+            str(state).upper()
+        )
+
+    # =========================================================
+    # Presentation data
+    # =========================================================
+
     def overview_data(self) -> dict[str, Any]:
-        """
-        Minimal data for the common Overview.
-
-        EMPTY       -> EMPTY
-        RECEIVING   -> FILLING 37%
-        STORING     -> 72%
-        FEEDING     -> FEEDING 54%
-        CIP         -> CIP
-        FAULT       -> FAULT
-        """
-
         level = self.actuals.level_percent
 
         if self.state == StorageTankState.EMPTY:
             status_text = "EMPTY"
 
-        elif (
-            self.state
-            == StorageTankState.RECEIVING
-        ):
+        elif self.state == StorageTankState.RECEIVING:
             status_text = (
                 f"FILLING {level:.0f}%"
             )
 
-        elif (
-            self.state
-            == StorageTankState.STORING
-        ):
+        elif self.state == StorageTankState.STORING:
             status_text = f"{level:.0f}%"
 
-        elif (
-            self.state
-            == StorageTankState.FEEDING
-        ):
+        elif self.state == StorageTankState.FEEDING:
             status_text = (
                 f"FEEDING {level:.0f}%"
             )
@@ -309,10 +817,19 @@ class StorageTank(Tank):
         storage_actuals = asdict(
             self.storage_actuals
         )
+        storage_actuals["agitator_cycle"] = (
+            self.storage_actuals
+            .agitator_cycle
+            .value
+        )
 
-        setpoints = asdict(self.setpoints)
+        setpoints = asdict(
+            self.setpoints
+        )
         setpoints["agitator_mode"] = (
-            self.setpoints.agitator_mode.value
+            self.setpoints
+            .agitator_mode
+            .value
         )
 
         result.update({
@@ -346,13 +863,6 @@ def create_storage_tanks(
         float | None,
     ] | None = None,
 ) -> dict[str, StorageTank]:
-    """
-    Create the four raw-milk storage tanks already present
-    on the Overview.
-
-    No production capacities are invented here.
-    """
-
     capacities_l = capacities_l or {}
 
     tank_ids = (

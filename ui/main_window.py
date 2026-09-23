@@ -11,6 +11,12 @@ from PySide6.QtWidgets import (
 from core.database import Database
 from core.logger import EventLogger
 from core.operator_session import OperatorSession
+from core.process_runtime import ProcessRuntime
+from core.simulation_profile import (
+    initial_milk_source_state,
+    milk_source_simulation_config,
+)
+from core.simulation_provider import SimulationProvider
 from core.user_manager import UserManager
 
 from ui.dialogs.initial_admin_dialog import (
@@ -51,6 +57,36 @@ class MainWindow(QMainWindow):
             user_manager=self.user_manager,
             event_logger=self.event_logger,
             parent=self,
+        )
+
+        # =====================================================
+        # Process data source + one central runtime
+        # =====================================================
+        self.data_provider = SimulationProvider(
+            milk_source_simulation_config()
+        )
+
+        for (
+            tank_id,
+            initial_state,
+        ) in initial_milk_source_state().items():
+            self.data_provider.set_initial_tank_contents(
+                tank_id=tank_id,
+                level_percent=initial_state.level_percent,
+                temperature_c=initial_state.temperature_c,
+            )
+
+        self.process_runtime = ProcessRuntime(
+            provider=self.data_provider,
+            interval_ms=200,
+            parent=self,
+        )
+
+        self.process_runtime.command_accepted.connect(
+            self._process_command_accepted
+        )
+        self.process_runtime.command_rejected.connect(
+            self._process_command_rejected
         )
 
         # =====================================================
@@ -127,8 +163,11 @@ class MainWindow(QMainWindow):
             "Overview",
         )
 
-        # Milk Storage is still a placeholder for now.
+        # Milk Storage is the first live automated process page.
         self.milk_storage_page = MilkStoragePage()
+        self.milk_storage_page.bind_runtime(
+            self.process_runtime
+        )
 
         self.tabs.addTab(
             self.milk_storage_page,
@@ -190,6 +229,8 @@ class MainWindow(QMainWindow):
         # =====================================================
         # Runtime
         # =====================================================
+        self.process_runtime.start()
+
         self.event_logger.log(
             "SYSTEM",
             "SCADA runtime started",
@@ -198,6 +239,53 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(
             0,
             self._ensure_authenticated,
+        )
+
+
+    def _process_command_accepted(
+        self,
+        target_id: str,
+        action: str,
+        value,
+    ) -> None:
+        action_text = action
+
+        if (
+            action == "SET_MODE"
+            and value is not None
+        ):
+            action_text = (
+                f"SET_MODE {str(value).upper()}"
+            )
+
+        self.event_logger.log(
+            "PROCESS",
+            f"{target_id}: {action_text}",
+        )
+
+    def _process_command_rejected(
+        self,
+        target_id: str,
+        action: str,
+        value,
+        reason: str,
+    ) -> None:
+        action_text = action
+
+        if (
+            action == "SET_MODE"
+            and value is not None
+        ):
+            action_text = (
+                f"SET_MODE {str(value).upper()}"
+            )
+
+        self.event_logger.log(
+            "PROCESS",
+            (
+                f"{target_id}: {action_text} rejected"
+                f" — {reason}"
+            ),
         )
 
     def create_page(self):
@@ -214,32 +302,38 @@ class MainWindow(QMainWindow):
         ):
             return
 
-        # Anchor the shared panel to the actual white Overview view,
-        # not to the whole QTabWidget/page.
-        #
-        # This keeps exactly the same visual position it had before
-        # Legend + Recent Events were moved out of OverviewPage:
-        # almost flush with the bottom-right edge of the white frame.
-        view = self.overview_page.view
-        view_rect = view.geometry()
+        page = self.tabs.currentWidget()
 
-        top_left = self.overview_page.mapTo(
+        if page is None:
+            return
+
+        # Anchor the shared panel to the CURRENT page's common work area.
+        # Overview and Milk Storage both expose `content_frame`, therefore
+        # the panel keeps the same right/bottom position on both tabs.
+        target = getattr(
+            page,
+            "content_frame",
+            page,
+        )
+
+        target_rect = target.rect()
+        top_left = target.mapTo(
             self.tabs,
-            view_rect.topLeft(),
+            target_rect.topLeft(),
         )
 
         inset = 10
 
         x = (
             top_left.x()
-            + view_rect.width()
+            + target_rect.width()
             - self.info_panel.width()
             - inset
         )
 
         y = (
             top_left.y()
-            + view_rect.height()
+            + target_rect.height()
             - self.info_panel.height()
             - inset
         )
@@ -340,6 +434,8 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event):
+        self.process_runtime.stop()
+
         self.event_logger.log(
             "SYSTEM",
             (
