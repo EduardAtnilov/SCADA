@@ -3,594 +3,134 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (
-    QColor,
-    QLinearGradient,
-    QPainter,
-    QPainterPath,
-    QPen,
-    QPolygonF,
-)
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF
 
 
 class AgitatorItem:
-    """
-    Reusable 2D agitator shown through a central vessel cutaway.
-
-    OFF -> stationary
-    ON  -> constant-speed visual rotation
-
-    The cutaway keeps the original tank bitmap visible underneath so the
-    stainless-steel appearance remains consistent with the vessel itself.
-    """
+    """Side elevation of an inclined agitator; dimensions are visual only."""
 
     def __init__(self) -> None:
         self.running = False
         self.angle_deg = 0.0
 
-    def set_running(
-        self,
-        running: bool,
-    ) -> None:
+    def set_running(self, running: bool) -> None:
         self.running = bool(running)
 
-    def advance(
-        self,
-        step_deg: float = 12.0,
-    ) -> bool:
+    def advance(self, step_deg: float = 12.0) -> bool:
         if not self.running:
             return False
-
-        self.angle_deg = (
-            self.angle_deg + step_deg
-        ) % 360.0
+        self.angle_deg = (self.angle_deg + step_deg) % 360.0
         return True
 
-    @staticmethod
-    def _blade_polygon(
-        x_inner: float,
-        x_outer: float,
-        y: float,
-        half_h: float,
-        left_side: bool,
-    ) -> QPolygonF:
-        tip = half_h * 0.55
-
-        if left_side:
-            return QPolygonF(
-                [
-                    QPointF(
-                        x_inner,
-                        y - half_h * 0.70,
-                    ),
-                    QPointF(
-                        x_outer + tip,
-                        y - half_h,
-                    ),
-                    QPointF(
-                        x_outer,
-                        y - half_h * 0.48,
-                    ),
-                    QPointF(
-                        x_outer,
-                        y + half_h * 0.48,
-                    ),
-                    QPointF(
-                        x_outer + tip,
-                        y + half_h,
-                    ),
-                    QPointF(
-                        x_inner,
-                        y + half_h * 0.70,
-                    ),
-                ]
-            )
-
-        return QPolygonF(
-            [
-                QPointF(
-                    x_inner,
-                    y - half_h * 0.70,
-                ),
-                QPointF(
-                    x_outer - tip,
-                    y - half_h,
-                ),
-                QPointF(
-                    x_outer,
-                    y - half_h * 0.48,
-                ),
-                QPointF(
-                    x_outer,
-                    y + half_h * 0.48,
-                ),
-                QPointF(
-                    x_outer - tip,
-                    y + half_h,
-                ),
-                QPointF(
-                    x_inner,
-                    y + half_h * 0.70,
-                ),
-            ]
-        )
-
-    def draw(
-        self,
-        painter: QPainter,
-        tank_rect: QRectF,
-    ) -> None:
+    def draw(self, painter: QPainter, tank_rect: QRectF) -> None:
+        if tank_rect.isEmpty():
+            return
         painter.save()
-        painter.setRenderHint(
-            QPainter.RenderHint.Antialiasing
-        )
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Normalized image coordinates keep geometry and pen widths together.
+        painter.translate(tank_rect.left(), tank_rect.top())
+        painter.scale(tank_rect.width() / 100.0, tank_rect.height() / 230.0)
 
-        w = tank_rect.width()
-        h = tank_rect.height()
-        center_x = tank_rect.center().x()
+        # The wavy break stays a single thin line. Only the motor-side
+        # shell edge has thickness and is drawn in front of the drive.
+        edge = QPainterPath(QPointF(98.0, 151.0))
+        edge.lineTo(92.5, 153.0)
+        edge.cubicTo(84.0, 153.0, 74.0, 148.0, 66.0, 152.0)
+        edge.cubicTo(60.0, 155.0, 56.0, 151.0, 54.0, 157.0)
+        edge.cubicTo(52.0, 164.0, 59.0, 167.0, 54.0, 174.0)
+        edge.cubicTo(50.0, 181.0, 55.0, 188.0, 63.0, 186.0)
+        edge.cubicTo(75.0, 184.0, 85.0, 183.0, 92.5, 183.0)
+        edge.lineTo(98.0, 185.0)
+        cut = QPainterPath(edge)
+        cut.closeSubpath()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor('#c8cdcf'))
+        painter.drawPath(cut)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor('#747b7f'), 0.65))
+        painter.drawPath(edge)
 
-        # ------------------------------------------------------------
-        # Central cutaway with visible shell thickness.
-        #
-        # The important difference from the previous versions is that this
-        # is not just a contour drawn over the tank.  We draw TWO openings:
-        #   1) outer cut edge,
-        #   2) inner opening.
-        #
-        # The metallic band between them is the actual visible thickness of
-        # the vessel wall, like in a real section drawing.
-        # ------------------------------------------------------------
-        cut_w = w * 0.50
-        cut_top = tank_rect.top() + h * 0.155
-        cut_bottom = tank_rect.bottom() - h * 0.095
-        cut_left = center_x - cut_w / 2.0
-        cut_right = center_x + cut_w / 2.0
+        # Correct for the tank aspect ratio so the displayed shaft is 15 deg.
+        tilt = math.atan(math.tan(math.radians(15.0)) *
+                         (tank_rect.width() / 100.0) /
+                         (tank_rect.height() / 230.0))
+        ax, ay = math.cos(tilt), -math.sin(tilt)
+        nx, ny = -ay, ax
+        hub_x, hub_y = 68.0, 172.0
+        length = (94.5 - hub_x) / ax
 
-        top_curve = h * 0.020
-        bottom_curve = h * 0.030
+        def point(along: float, across: float) -> QPointF:
+            return QPointF(hub_x + ax * along + nx * across,
+                           hub_y + ay * along + ny * across)
 
-        # Outer edge of the removed shell section.
-        outer_cut = QPainterPath()
-        outer_cut.moveTo(
-            QPointF(
-                cut_left,
-                cut_top + top_curve,
-            )
-        )
-        outer_cut.quadTo(
-            QPointF(
-                center_x,
-                cut_top - top_curve * 0.20,
-            ),
-            QPointF(
-                cut_right,
-                cut_top + top_curve,
-            ),
-        )
-        outer_cut.lineTo(
-            QPointF(
-                cut_right,
-                cut_bottom - bottom_curve,
-            )
-        )
-        outer_cut.quadTo(
-            QPointF(
-                center_x,
-                cut_bottom + bottom_curve * 0.40,
-            ),
-            QPointF(
-                cut_left,
-                cut_bottom - bottom_curve,
-            ),
-        )
-        outer_cut.closeSubpath()
+        # Project a pitched blade rotating about the inclined shaft into
+        # the side view: radial travel collapses to a line, while pitch
+        # produces changing visible blade width. This is not a front view.
+        def blade(phase: float) -> QPolygonF:
+            vertices = []
+            for radius, chord in ((2.0, -1.6), (12.0, -4.2),
+                                  (12.8, 3.4), (3.0, 2.0)):
+                along = chord * math.sin(math.radians(28.0))
+                radial = radius * math.cos(phase)
+                radial -= chord * math.cos(math.radians(28.0)) * math.sin(phase)
+                vertices.append(point(along, radial))
+            return QPolygonF(vertices)
 
-        # Inner edge: inset produces visible wall thickness.
-        wall_x = max(
-            3.2,
-            w * 0.045,
-        )
-        wall_y = max(
-            2.5,
-            h * 0.018,
-        )
-
-        inner_left = cut_left + wall_x
-        inner_right = cut_right - wall_x
-        inner_top = cut_top + wall_y
-        inner_bottom = cut_bottom - wall_y
-
-        inner_cut = QPainterPath()
-        inner_cut.moveTo(
-            QPointF(
-                inner_left,
-                inner_top + top_curve * 0.72,
-            )
-        )
-        inner_cut.quadTo(
-            QPointF(
-                center_x,
-                inner_top,
-            ),
-            QPointF(
-                inner_right,
-                inner_top + top_curve * 0.72,
-            ),
-        )
-        inner_cut.lineTo(
-            QPointF(
-                inner_right,
-                inner_bottom - bottom_curve * 0.72,
-            )
-        )
-        inner_cut.quadTo(
-            QPointF(
-                center_x,
-                inner_bottom + bottom_curve * 0.18,
-            ),
-            QPointF(
-                inner_left,
-                inner_bottom - bottom_curve * 0.72,
-            ),
-        )
-        inner_cut.closeSubpath()
-
-        # The ring between outer and inner shapes = wall thickness.
-        shell_band = outer_cut.subtracted(
-            inner_cut
-        )
-
-        wall_gradient = QLinearGradient(
-            cut_left,
-            0.0,
-            cut_right,
-            0.0,
-        )
-        wall_gradient.setColorAt(
-            0.0,
-            QColor("#62676a"),
-        )
-        wall_gradient.setColorAt(
-            0.16,
-            QColor("#9da2a4"),
-        )
-        wall_gradient.setColorAt(
-            0.42,
-            QColor("#d9dcdd"),
-        )
-        wall_gradient.setColorAt(
-            0.58,
-            QColor("#f0f1f1"),
-        )
-        wall_gradient.setColorAt(
-            0.82,
-            QColor("#9a9fa1"),
-        )
-        wall_gradient.setColorAt(
-            1.0,
-            QColor("#5d6265"),
-        )
-
-        painter.setPen(
-            Qt.PenStyle.NoPen
-        )
-        painter.setBrush(
-            wall_gradient
-        )
-        painter.drawPath(
-            shell_band
-        )
-
-        # Darker outer cut edge.
-        painter.setPen(
-            QPen(
-                QColor(
-                    62,
-                    67,
-                    70,
-                    220,
-                ),
-                1.05,
-            )
-        )
-        painter.setBrush(
-            Qt.BrushStyle.NoBrush
-        )
-        painter.drawPath(
-            outer_cut
-        )
-
-        # Thin highlight on the inner steel edge.
-        painter.setPen(
-            QPen(
-                QColor(
-                    235,
-                    236,
-                    237,
-                    210,
-                ),
-                0.75,
-            )
-        )
-        painter.drawPath(
-            inner_cut
-        )
-
-        # Small inner shadow gives actual depth behind the wall thickness,
-        # while the original tank texture remains visible underneath.
+        phases = [math.radians(self.angle_deg + offset) for offset in (0, 120, 240)]
         painter.save()
-        painter.setClipPath(
-            inner_cut
-        )
-
-        depth_shadow = QLinearGradient(
-            inner_left,
-            0.0,
-            inner_right,
-            0.0,
-        )
-        depth_shadow.setColorAt(
-            0.0,
-            QColor(
-                28,
-                33,
-                36,
-                42,
-            ),
-        )
-        depth_shadow.setColorAt(
-            0.14,
-            QColor(
-                28,
-                33,
-                36,
-                10,
-            ),
-        )
-        depth_shadow.setColorAt(
-            0.50,
-            QColor(
-                255,
-                255,
-                255,
-                0,
-            ),
-        )
-        depth_shadow.setColorAt(
-            0.86,
-            QColor(
-                28,
-                33,
-                36,
-                10,
-            ),
-        )
-        depth_shadow.setColorAt(
-            1.0,
-            QColor(
-                28,
-                33,
-                36,
-                42,
-            ),
-        )
-
-        painter.setPen(
-            Qt.PenStyle.NoPen
-        )
-        painter.setBrush(
-            depth_shadow
-        )
-        painter.drawPath(
-            inner_cut
-        )
+        painter.setClipPath(cut, Qt.ClipOperation.IntersectClip)
+        painter.setPen(QPen(QColor('#535d62'), 2.1))
+        painter.drawLine(point(-1.0, 0.0), point(length + 1.0, 0.0))
+        for phase in sorted(phases, key=math.sin):
+            painter.setPen(QPen(QColor('#465056'), 0.55))
+            painter.setBrush(QColor('#586970' if math.sin(phase) < 0 else '#869ba5'))
+            painter.drawPolygon(blade(phase))
+        painter.setPen(QPen(QColor('#424d53'), 0.65))
+        painter.setBrush(QColor('#9da7ab'))
+        painter.drawPolygon(QPolygonF([point(-2.4, -1.7), point(2.4, -1.7),
+                                       point(2.4, 1.7), point(-2.4, 1.7)]))
         painter.restore()
 
-        # All mixer parts are clipped to the actual inner opening.
-        cut_path = inner_cut
-
+        # Drive and shaft share exactly the same inclined axis. Positioned
+        # below the data card; its rightmost point also stays before the card.
         painter.save()
-        painter.setClipPath(
-            cut_path
-        )
-
-        # ------------------------------------------------------------
-        # Mixer shaft.
-        #
-        # Motor/gearbox stays hidden; the shaft simply disappears upward.
-        # ------------------------------------------------------------
-        shaft_top = cut_top - h * 0.08
-        shaft_bottom = (
-            cut_bottom
-            - h * 0.008
-        )
-
-        painter.setPen(
-            QPen(
-                QColor("#555b5f"),
-                3.0,
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-            )
-        )
-        painter.drawLine(
-            QPointF(
-                center_x,
-                shaft_top,
-            ),
-            QPointF(
-                center_x,
-                shaft_bottom,
-            ),
-        )
-
-        painter.setPen(
-            QPen(
-                QColor(
-                    228,
-                    230,
-                    231,
-                    205,
-                ),
-                0.75,
-                Qt.PenStyle.SolidLine,
-                Qt.PenCapStyle.RoundCap,
-            )
-        )
-        painter.drawLine(
-            QPointF(
-                center_x - 0.55,
-                cut_top,
-            ),
-            QPointF(
-                center_x - 0.55,
-                shaft_bottom - 1.0,
-            ),
-        )
-
-        # ------------------------------------------------------------
-        # Three stainless paddle stages.
-        # Lowest stage sits very close to the vessel bottom.
-        # ------------------------------------------------------------
-        angle = math.radians(
-            self.angle_deg
-        )
-
-        visible_factor = (
-            0.18
-            + 0.82 * abs(
-                math.cos(angle)
-            )
-        )
-
-        cut_h = cut_bottom - cut_top
-
-        stage_y_values = (
-            cut_top + cut_h * 0.34,
-            cut_top + cut_h * 0.61,
-            cut_bottom - h * 0.038,
-        )
-
-        max_half_span = cut_w * 0.35
-        half_span = max_half_span * visible_factor
-
-        inner_gap = max(
-            2.8,
-            w * 0.022,
-        )
-        half_blade_h = max(
-            2.8,
-            h * 0.016,
-        )
-
-        blade_gradient = QLinearGradient(
-            0.0,
-            -half_blade_h,
-            0.0,
-            half_blade_h,
-        )
-        blade_gradient.setColorAt(
-            0.0,
-            QColor("#4e5458"),
-        )
-        blade_gradient.setColorAt(
-            0.22,
-            QColor("#777e82"),
-        )
-        blade_gradient.setColorAt(
-            0.50,
-            QColor("#c6cacc"),
-        )
-        blade_gradient.setColorAt(
-            0.78,
-            QColor("#737a7e"),
-        )
-        blade_gradient.setColorAt(
-            1.0,
-            QColor("#4a5054"),
-        )
-
-        for stage_y in stage_y_values:
-            left_blade = self._blade_polygon(
-                center_x - inner_gap,
-                center_x - half_span,
-                stage_y,
-                half_blade_h,
-                True,
-            )
-            right_blade = self._blade_polygon(
-                center_x + inner_gap,
-                center_x + half_span,
-                stage_y,
-                half_blade_h,
-                False,
-            )
-
-            painter.setPen(
-                QPen(
-                    QColor("#464d51"),
-                    0.8,
-                )
-            )
-            painter.setBrush(
-                blade_gradient
-            )
-            painter.drawPolygon(
-                left_blade
-            )
-            painter.drawPolygon(
-                right_blade
-            )
-
-            hub_w = max(
-                5.5,
-                w * 0.052,
-            )
-            hub_h = max(
-                3.5,
-                h * 0.018,
-            )
-
-            hub = QRectF(
-                center_x - hub_w / 2.0,
-                stage_y - hub_h / 2.0,
-                hub_w,
-                hub_h,
-            )
-
-            hub_gradient = QLinearGradient(
-                hub.left(),
-                0.0,
-                hub.right(),
-                0.0,
-            )
-            hub_gradient.setColorAt(
-                0.0,
-                QColor("#484f53"),
-            )
-            hub_gradient.setColorAt(
-                0.48,
-                QColor("#bcc1c3"),
-            )
-            hub_gradient.setColorAt(
-                1.0,
-                QColor("#474e52"),
-            )
-
-            painter.setPen(
-                QPen(
-                    QColor("#41484c"),
-                    0.65,
-                )
-            )
-            painter.setBrush(
-                hub_gradient
-            )
-            painter.drawRoundedRect(
-                hub,
-                1.0,
-                1.0,
-            )
-
+        painter.translate(point(length, 0.0))
+        painter.rotate(-math.degrees(tilt))
+        painter.scale(1.12, 1.25)
+        painter.setPen(QPen(QColor('#515a60'), 0.7))
+        painter.setBrush(QColor('#b1b9bd'))
+        painter.drawRoundedRect(QRectF(-1.0, -5.5, 2.7, 11.0), 0.6, 0.6)
+        painter.setBrush(QColor('#919da3'))
+        painter.drawRoundedRect(QRectF(1.7, -3.4, 4.0, 6.8), 0.8, 0.8)
+        gradient = QLinearGradient(0.0, -4.5, 0.0, 4.5)
+        gradient.setColorAt(0.0, QColor('#c6ced2'))
+        gradient.setColorAt(0.5, QColor('#939fa6'))
+        gradient.setColorAt(1.0, QColor('#647078'))
+        painter.setBrush(gradient)
+        painter.drawRoundedRect(QRectF(5.2, -4.5, 10.0, 9.0), 1.3, 1.3)
+        painter.setPen(QPen(QColor('#616c73'), 0.5))
+        for y in (-2.4, 0.0, 2.4):
+            painter.drawLine(QPointF(6.5, y), QPointF(13.5, y))
+        painter.setBrush(QColor('#707d85'))
+        painter.drawRoundedRect(QRectF(14.0, -3.9, 1.8, 7.8), 0.6, 0.6)
         painter.restore()
+
+        # Foreground metal lip hides the inboard flange/coupling, making
+        # the drive emerge from behind the shell instead of lying on it.
+        lip = QPainterPath(QPointF(98.0, 151.0))
+        lip.lineTo(98.0, 185.0)
+        lip.lineTo(92.5, 183.0)
+        lip.lineTo(92.5, 153.0)
+        lip.closeSubpath()
+        metal = QLinearGradient(92.5, 0.0, 98.0, 0.0)
+        metal.setColorAt(0.0, QColor('#68747a'))
+        metal.setColorAt(0.3, QColor('#c0c7ca'))
+        metal.setColorAt(0.65, QColor('#eef0ef'))
+        metal.setColorAt(1.0, QColor('#81898d'))
+        painter.setBrush(metal)
+        rim_pen = QPen(QColor('#737c80'), 0.55)
+        rim_pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+        rim_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+        painter.setPen(rim_pen)
+        painter.drawPath(lip)
         painter.restore()
