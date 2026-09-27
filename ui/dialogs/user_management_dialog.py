@@ -17,19 +17,54 @@ from PySide6.QtWidgets import (
 )
 
 
-COMMON_STYLE = """
-    QPushButton#DestructiveAction {
-        background: #c94f49;
-        color: #ffffff;
-        border: 1px solid #c94f49;
-        border-radius: 5px;
-    }
+# Keep dialog controls on the native Qt / operating-system style.
+# In particular, do not restyle Delete Operator with QSS: doing so changes
+# its frame metrics and makes it shorter / more rounded than its neighbours.
+COMMON_STYLE = ""
 
-    QPushButton#DestructiveAction:pressed {
-        background: #aa413c;
-        border-color: #aa413c;
-    }
-"""
+
+def _apply_destructive_palette(
+    button: QPushButton,
+) -> None:
+    """
+    Match the red used by the PyCharm STOP control from the reference
+    screenshot while keeping the same fixed geometry as neighbouring buttons.
+    """
+    button.setStyleSheet(
+        """
+        QPushButton {
+            color: #ffffff;
+            background-color: #c94f4f;
+            border: 1px solid #d85f5f;
+            border-radius: 2px;
+
+            /*
+             * The widget geometry is already identical to the neighbouring
+             * buttons. Native buttons simply paint their frame slightly
+             * inside that geometry, while a QSS button fills it edge-to-edge.
+             * A 1 px visual inset makes the red button look the same size.
+             */
+            margin: 1px;
+            padding: 0px 9px;
+        }
+
+        QPushButton:hover {
+            background-color: #d85a5a;
+            border-color: #e06a6a;
+        }
+
+        QPushButton:pressed {
+            background-color: #b84444;
+            border-color: #b84444;
+        }
+
+        QPushButton:disabled {
+            color: #d9d9d9;
+            background-color: #7f4545;
+            border-color: #7f4545;
+        }
+        """
+    )
 
 
 def _equalize_compact_width(*buttons):
@@ -383,8 +418,8 @@ class UserManagementDialog(QDialog):
         delete_button = QPushButton("Delete Operator")
         close_button = QPushButton("Close")
 
-        delete_button.setObjectName(
-            "DestructiveAction"
+        _apply_destructive_palette(
+            delete_button
         )
 
         _equalize_compact_width(
@@ -392,6 +427,22 @@ class UserManagementDialog(QDialog):
             delete_button,
             close_button,
         )
+
+        # Guarantee identical native button height in this action row.
+        action_height = max(
+            password_button.sizeHint().height(),
+            delete_button.sizeHint().height(),
+            close_button.sizeHint().height(),
+        )
+
+        for button in (
+            password_button,
+            delete_button,
+            close_button,
+        ):
+            button.setFixedHeight(
+                action_height
+            )
 
         password_button.clicked.connect(
             self._reset_password

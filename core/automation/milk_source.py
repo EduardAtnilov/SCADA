@@ -67,9 +67,53 @@ class MilkSourceAutomation:
     VALVE_TIMEOUT_S = 8.0
     PUMP_TIMEOUT_S = 8.0
 
-    def __init__(self):
+    CIP_PHASES = (
+        "WARM_PRE_RINSE",
+        "CAUSTIC_WASH",
+        "WARM_INTERMEDIATE_RINSE",
+        "HOT_WATER_DISINFECTION",
+    )
+
+    def __init__(
+        self,
+        cip_phase_durations_s: Mapping[
+            str,
+            float,
+        ] | None = None,
+    ):
         self._executions: dict[str, RouteExecution] = {}
         self._resource_owners: dict[str, str] = {}
+
+        self._cip_phase_durations_s = {
+            str(name): float(duration)
+            for name, duration
+            in (
+                cip_phase_durations_s
+                or {}
+            ).items()
+        }
+
+        for phase, duration in (
+            self._cip_phase_durations_s.items()
+        ):
+            if duration < 0.0:
+                raise ValueError(
+                    f"CIP duration for {phase} cannot be negative."
+                )
+
+        if self._cip_phase_durations_s:
+            missing = [
+                phase
+                for phase in self.CIP_PHASES
+                if phase
+                not in self._cip_phase_durations_s
+            ]
+
+            if missing:
+                raise ValueError(
+                    "Missing CIP phase duration(s): "
+                    + ", ".join(missing)
+                )
 
     # =========================================================
     # Operator / higher-level requests
@@ -259,6 +303,18 @@ class MilkSourceAutomation:
             None,
         )
 
+        cip_phase = "IDLE"
+        cip_progress_percent = 0.0
+
+        if cip is not None:
+            (
+                cip_phase,
+                cip_progress_percent,
+                _cip_complete,
+            ) = self._cip_status(
+                cip
+            )
+
         return {
             # "active" intentionally means that the automatic sequence
             # exists, not only that it already reached ACTIVE.
@@ -296,20 +352,51 @@ class MilkSourceAutomation:
                 if active is not None
                 else None
             ),
+            "cip_phase": cip_phase,
+            "cip_progress_percent": (
+                cip_progress_percent
+            ),
         }
 
-    def active_routes(self) -> tuple[dict[str, Any], ...]:
-        return tuple(
-            {
+
+    def active_routes(
+        self,
+    ) -> tuple[dict[str, Any], ...]:
+        result: list[dict[str, Any]] = []
+
+        for item in self._executions.values():
+            (
+                cip_phase,
+                cip_progress_percent,
+                _cip_complete,
+            ) = self._cip_status(
+                item
+            )
+
+            result.append({
                 "execution_id": item.execution_id,
                 "tank_id": item.plan.tank_id,
-                "operation": item.plan.operation.value,
+                "operation": (
+                    item.plan.operation.value
+                ),
                 "name": item.plan.name,
                 "state": item.state.value,
                 "fault_reason": item.fault_reason,
-            }
-            for item in self._executions.values()
-        )
+                "pump_id": item.plan.pump_id,
+                "supply_media": (
+                    item.plan.supply_media
+                ),
+                "return_media": (
+                    item.plan.return_media
+                ),
+                "cip_phase": cip_phase,
+                "cip_progress_percent": (
+                    cip_progress_percent
+                ),
+            })
+
+        return tuple(result)
+
 
     def valve_requirements(
         self,
@@ -318,25 +405,44 @@ class MilkSourceAutomation:
         tuple[tuple[str, str], ...],
     ]:
         """
-        Publish only the valve states required by currently owned routes.
+        Publish the valve state currently required by each owned route.
 
-        The route layer does not decide whether a manual command is allowed.
-        That decision belongs to equipment.valve.Valve.
+        During normal route ownership, route valves are protected OPEN and
+        isolation valves CLOSED. During route shutdown/fault recovery, the
+        route valves themselves are protected CLOSED.
+
+        Manual command permission remains equipment.valve.Valve's job.
         """
         requirements: dict[
             str,
             list[tuple[str, str]],
         ] = {}
 
+        closing_states = {
+            RouteState.CLOSE_ROUTE,
+            RouteState.WAIT_ROUTE_CLOSED,
+            RouteState.FAULT,
+        }
+
         for execution in self._executions.values():
             plan = execution.plan
+
+            route_valve_state = (
+                "CLOSED"
+                if execution.state
+                in closing_states
+                else "OPEN"
+            )
 
             for valve_id in plan.open_valves:
                 requirements.setdefault(
                     valve_id,
                     [],
                 ).append(
-                    ("OPEN", plan.name)
+                    (
+                        route_valve_state,
+                        plan.name,
+                    )
                 )
 
             for valve_id in plan.close_valves:
@@ -344,12 +450,65 @@ class MilkSourceAutomation:
                     valve_id,
                     [],
                 ).append(
-                    ("CLOSED", plan.name)
+                    (
+                        "CLOSED",
+                        plan.name,
+                    )
                 )
 
         return {
             valve_id: tuple(items)
             for valve_id, items
+            in requirements.items()
+        }
+    def pump_requirements(
+        self,
+    ) -> dict[
+        str,
+        tuple[tuple[str, str], ...],
+    ]:
+        """
+        Publish the physical pump state required by each owned route.
+
+        The automation layer only declares requirements.
+        equipment.pump.Pump decides whether a MANUAL command is allowed.
+        """
+        requirements: dict[
+            str,
+            list[tuple[str, str]],
+        ] = {}
+
+        running_states = {
+            RouteState.START_PUMP,
+            RouteState.WAIT_PUMP_RUNNING,
+            RouteState.ACTIVE,
+        }
+
+        for execution in self._executions.values():
+            plan = execution.plan
+
+            if not plan.pump_id:
+                continue
+
+            required = (
+                "RUNNING"
+                if execution.state in running_states
+                else "STOPPED"
+            )
+
+            requirements.setdefault(
+                plan.pump_id,
+                [],
+            ).append(
+                (
+                    required,
+                    plan.name,
+                )
+            )
+
+        return {
+            pump_id: tuple(items)
+            for pump_id, items
             in requirements.items()
         }
 
@@ -708,6 +867,24 @@ class MilkSourceAutomation:
                     execution,
                     reason,
                 )
+
+            if (
+                plan.operation
+                == StorageOperation.CIP
+            ):
+                (
+                    _phase,
+                    _progress,
+                    complete,
+                ) = self._cip_status(
+                    execution
+                )
+
+                if complete:
+                    execution.change_state(
+                        RouteState.CLOSE_ROUTE
+                    )
+
             return []
 
         if state == RouteState.STOP_PUMP:
@@ -795,6 +972,66 @@ class MilkSourceAutomation:
         # FAULT stays latched until reset_fault().
         return []
 
+
+    def _cip_status(
+        self,
+        execution: RouteExecution,
+    ) -> tuple[str, float, bool]:
+        """
+        CIP recipe sequencing belongs to automation, not physical simulation.
+        """
+        if (
+            execution.plan.operation
+            != StorageOperation.CIP
+        ):
+            return "IDLE", 0.0, False
+
+        if not self._cip_phase_durations_s:
+            return "IDLE", 0.0, False
+
+        if execution.state in (
+            RouteState.CLOSE_ROUTE,
+            RouteState.WAIT_ROUTE_CLOSED,
+        ):
+            return "COMPLETE", 100.0, True
+
+        if execution.state != RouteState.ACTIVE:
+            return "IDLE", 0.0, False
+
+        elapsed = max(
+            0.0,
+            float(
+                execution.elapsed_in_state_s
+            ),
+        )
+
+        for phase in self.CIP_PHASES:
+            duration = float(
+                self._cip_phase_durations_s[
+                    phase
+                ]
+            )
+
+            if duration <= 0.0:
+                continue
+
+            if elapsed < duration:
+                return (
+                    phase,
+                    min(
+                        100.0,
+                        (
+                            elapsed
+                            / duration
+                            * 100.0
+                        ),
+                    ),
+                    False,
+                )
+
+            elapsed -= duration
+
+        return "COMPLETE", 100.0, True
     # =========================================================
     # Permissives / interlocks
     # =========================================================

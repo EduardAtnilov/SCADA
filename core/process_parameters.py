@@ -54,6 +54,15 @@ MILK_RECEPTION_FLOW_L_H = 20_000.0
 # Incoming milk is treated as already chilled at reception.
 MILK_RECEPTION_TEMPERATURE_C = 4.0
 
+# Current project design value for transfer from raw-milk storage
+# to pasteurization.
+MILK_TRANSFER_FLOW_L_H = 6_000.0
+
+# Raw-milk storage equipment-level limits.
+# These belong to StorageTank setpoints, not to the physical simulator.
+MILK_STORAGE_LOW_LEVEL_LIMIT_PERCENT = 5.0
+MILK_STORAGE_HIGH_LEVEL_LIMIT_PERCENT = 100.0
+
 
 # Routine CIP for raw-milk storage tanks / other "cold" dairy equipment.
 # Acid is intentionally not included in every routine storage-tank cycle.

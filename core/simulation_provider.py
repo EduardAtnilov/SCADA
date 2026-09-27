@@ -6,39 +6,62 @@ from core.data_provider import (
     DataProvider,
     ProviderCommand,
 )
+from core.milk_source_controller import (
+    MilkSourceControlConfig,
+    MilkSourceController,
+)
 from core.simulation import (
     MilkSourceSimulationConfig,
-    SimulationEngine,
 )
 
 
 class SimulationProvider(DataProvider):
     """
-    DataProvider implementation backed by SimulationEngine.
+    Application boundary for simulated process data.
 
-    This is the only layer above SimulationEngine that the application
-    needs to know about. Replacing it with a PLC/OPC UA provider later
-    should not require rewriting MilkStoragePage or StorageTank.
+    Provider translates generic application commands to the Milk Source
+    controller. It does not contain equipment or process-control logic.
     """
 
     def __init__(
         self,
         config: MilkSourceSimulationConfig,
+        control_config: (
+            MilkSourceControlConfig
+            | None
+        ) = None,
     ):
-        self.engine = SimulationEngine(
-            config=config,
+        if control_config is None:
+            # Local import avoids making simulation.py depend on project
+            # setpoints and keeps the existing MainWindow constructor call
+            # backward-compatible.
+            from core.simulation_profile import (
+                milk_source_control_config,
+            )
+
+            control_config = (
+                milk_source_control_config()
+            )
+
+        self.controller = (
+            MilkSourceController(
+                simulation_config=config,
+                control_config=control_config,
+            )
         )
 
     def update(
         self,
         dt_s: float,
     ) -> None:
-        self.engine.update(
+        self.controller.update(
             dt_s
         )
 
-    def snapshot(self) -> Mapping[str, Any]:
-        return self.engine.ui_snapshot()
+    def snapshot(
+        self,
+    ) -> Mapping[str, Any]:
+        return self.controller.snapshot()
 
     def execute(
         self,
@@ -48,13 +71,19 @@ class SimulationProvider(DataProvider):
         action = command.action.upper()
 
         if action == "START_TRANSFER":
-            return self.engine.start_transfer(
-                target_id
+            return (
+                self.controller
+                .start_transfer(
+                    target_id
+                )
             )
 
         if action == "STOP_TRANSFER":
-            stopped = self.engine.stop_transfer(
-                target_id
+            stopped = (
+                self.controller
+                .stop_transfer(
+                    target_id
+                )
             )
             return (
                 (True, None)
@@ -72,14 +101,22 @@ class SimulationProvider(DataProvider):
                     "Reception volume is required.",
                 )
 
-            return self.engine.start_reception(
-                target_id,
-                float(command.value),
+            return (
+                self.controller
+                .start_reception(
+                    target_id,
+                    float(
+                        command.value
+                    ),
+                )
             )
 
         if action == "STOP_RECEPTION":
-            stopped = self.engine.stop_reception(
-                target_id
+            stopped = (
+                self.controller
+                .stop_reception(
+                    target_id
+                )
             )
             return (
                 (True, None)
@@ -91,13 +128,19 @@ class SimulationProvider(DataProvider):
             )
 
         if action == "START_CIP":
-            return self.engine.start_cip(
-                target_id
+            return (
+                self.controller
+                .start_cip(
+                    target_id
+                )
             )
 
         if action == "STOP_CIP":
-            stopped = self.engine.stop_cip(
-                target_id
+            stopped = (
+                self.controller
+                .stop_cip(
+                    target_id
+                )
             )
             return (
                 (True, None)
@@ -112,32 +155,49 @@ class SimulationProvider(DataProvider):
             "OPEN",
             "CLOSE",
         ):
-            return self.engine.command_valve(
-                target_id,
-                action,
+            return (
+                self.controller
+                .command_valve(
+                    target_id,
+                    action,
+                )
             )
 
         if action in (
             "START",
             "STOP",
         ):
-            self.engine.command_pump(
-                target_id,
-                action,
+            return (
+                self.controller
+                .command_pump(
+                    target_id,
+                    action,
+                )
             )
-            return True, None
 
         if action == "AGITATOR":
-            return self.engine.set_agitator_command(
-                target_id,
-                bool(command.value),
+            return (
+                self.controller
+                .set_agitator_command(
+                    target_id,
+                    bool(
+                        command.value
+                    ),
+                )
             )
 
         if action == "SET_MODE":
-            if target_id.startswith("01-TK1"):
-                return self.engine.set_agitator_mode(
-                    target_id,
-                    str(command.value),
+            if target_id.startswith(
+                "01-TK1"
+            ):
+                return (
+                    self.controller
+                    .set_agitator_mode(
+                        target_id,
+                        str(
+                            command.value
+                        ),
+                    )
                 )
 
             if target_id.startswith(
@@ -146,22 +206,44 @@ class SimulationProvider(DataProvider):
                     "01-VC",
                 )
             ):
-                return self.engine.set_valve_mode(
-                    target_id,
-                    str(command.value),
+                return (
+                    self.controller
+                    .set_valve_mode(
+                        target_id,
+                        str(
+                            command.value
+                        ),
+                    )
                 )
 
-            # Pump service mode is currently local UI state.
-            return True, None
+            if target_id.startswith(
+                "01-PM"
+            ):
+                return (
+                    self.controller
+                    .set_pump_mode(
+                        target_id,
+                        str(
+                            command.value
+                        ),
+                    )
+                )
+
+            return (
+                False,
+                f"Unsupported SET_MODE target: {target_id}",
+            )
 
         return (
             False,
-            f"Unsupported provider action: {command.action}",
+            (
+                "Unsupported provider action: "
+                f"{command.action}"
+            ),
         )
 
     # ---------------------------------------------------------
-    # Simulation-only setup/test helpers.
-    # These are not used by equipment/UI logic.
+    # Simulation-only setup/test helpers
     # ---------------------------------------------------------
 
     def set_initial_tank_contents(
@@ -170,17 +252,17 @@ class SimulationProvider(DataProvider):
         level_percent: float,
         temperature_c: float | None = None,
     ) -> None:
-        self.engine.set_tank_contents(
-            tank_id=tank_id,
-            level_percent=level_percent,
-            temperature_c=temperature_c,
+        self.controller.set_initial_tank_contents(
+            tank_id,
+            level_percent,
+            temperature_c,
         )
 
     def inject_valve_fault(
         self,
         valve_id: str,
     ) -> None:
-        self.engine.inject_valve_fault(
+        self.controller.inject_valve_fault(
             valve_id
         )
 
@@ -188,7 +270,7 @@ class SimulationProvider(DataProvider):
         self,
         valve_id: str,
     ) -> None:
-        self.engine.clear_valve_fault(
+        self.controller.clear_valve_fault(
             valve_id
         )
 
@@ -196,7 +278,7 @@ class SimulationProvider(DataProvider):
         self,
         pump_id: str = "01-PM1",
     ) -> None:
-        self.engine.inject_pump_fault(
+        self.controller.inject_pump_fault(
             pump_id
         )
 
@@ -204,6 +286,6 @@ class SimulationProvider(DataProvider):
         self,
         pump_id: str = "01-PM1",
     ) -> None:
-        self.engine.clear_pump_fault(
+        self.controller.clear_pump_fault(
             pump_id
         )

@@ -122,7 +122,22 @@ class StorageTank(Tank):
         self,
         snapshot: Mapping[str, Any],
     ) -> None:
-        self._apply_common_snapshot(snapshot)
+        # Generic Tank and StorageTank intentionally use different state
+        # vocabularies (HOLDING vs STORING). Apply only common physical
+        # fields through the base class, then handle StorageTankState below.
+        common_snapshot = {
+            key: value
+            for key, value
+            in snapshot.items()
+            if key not in (
+                "state",
+                "cip_phase",
+                "cip_progress_percent",
+            )
+        }
+        super().apply_snapshot(
+            common_snapshot
+        )
 
         if "state" in snapshot:
             self.state = StorageTankState(
@@ -198,6 +213,8 @@ class StorageTank(Tank):
         self,
         setpoints: Mapping[str, Any],
     ) -> None:
+        super().apply_setpoints(setpoints)
+
         if "max_storage_temperature_c" in setpoints:
             value = setpoints[
                 "max_storage_temperature_c"

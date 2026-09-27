@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from core.milk_source_controller import (
+    MilkSourceControlConfig,
+)
 from core.process_parameters import (
     EQUIPMENT_VOLUMES,
     MILK_RECEPTION_FLOW_L_H,
@@ -12,7 +15,10 @@ from core.process_parameters import (
     MILK_STORAGE_AGITATOR_SPEED_RPM,
     MILK_STORAGE_AGITATOR_START_LEVEL_PERCENT,
     MILK_STORAGE_CIP_PHASE_DURATIONS_S,
+    MILK_STORAGE_HIGH_LEVEL_LIMIT_PERCENT,
     MILK_STORAGE_IDS,
+    MILK_STORAGE_LOW_LEVEL_LIMIT_PERCENT,
+    MILK_TRANSFER_FLOW_L_H,
 )
 from core.simulation import (
     MilkSourceSimulationConfig,
@@ -27,16 +33,27 @@ class InitialTankState:
 
 def milk_source_simulation_config(
 ) -> MilkSourceSimulationConfig:
+    """
+    Physical simulator parameters only.
+    """
     return MilkSourceSimulationConfig(
         capacities_l={
             tank_id:
-            EQUIPMENT_VOLUMES[tank_id].nominal_l
-            for tank_id in MILK_STORAGE_IDS
+            EQUIPMENT_VOLUMES[
+                tank_id
+            ].nominal_l
+            for tank_id
+            in MILK_STORAGE_IDS
         },
         working_capacities_l={
             tank_id:
-            float(EQUIPMENT_VOLUMES[tank_id].working_l)
-            for tank_id in MILK_STORAGE_IDS
+            float(
+                EQUIPMENT_VOLUMES[
+                    tank_id
+                ].working_l
+            )
+            for tank_id
+            in MILK_STORAGE_IDS
         },
         reception_flow_l_h=(
             MILK_RECEPTION_FLOW_L_H
@@ -44,15 +61,30 @@ def milk_source_simulation_config(
         reception_temperature_c=(
             MILK_RECEPTION_TEMPERATURE_C
         ),
-        transfer_flow_l_h=6000.0,
-        cip_phase_durations_s=(
-            MILK_STORAGE_CIP_PHASE_DURATIONS_S
+        transfer_flow_l_h=(
+            MILK_TRANSFER_FLOW_L_H
         ),
         valve_travel_time_s=1.0,
         pump_start_time_s=1.5,
         pump_stop_time_s=1.0,
-        low_level_percent=5.0,
-        high_level_percent=100.0,
+    )
+
+
+def milk_source_control_config(
+) -> MilkSourceControlConfig:
+    """
+    Equipment and automation setpoints.
+    """
+    return MilkSourceControlConfig(
+        cip_phase_durations_s=(
+            MILK_STORAGE_CIP_PHASE_DURATIONS_S
+        ),
+        low_level_percent=(
+            MILK_STORAGE_LOW_LEVEL_LIMIT_PERCENT
+        ),
+        high_level_percent=(
+            MILK_STORAGE_HIGH_LEVEL_LIMIT_PERCENT
+        ),
         agitator_start_level_percent=(
             MILK_STORAGE_AGITATOR_START_LEVEL_PERCENT
         ),
@@ -82,5 +114,6 @@ def initial_milk_source_state(
             level_percent=0.0,
             temperature_c=None,
         )
-        for tank_id in MILK_STORAGE_IDS
+        for tank_id
+        in MILK_STORAGE_IDS
     }

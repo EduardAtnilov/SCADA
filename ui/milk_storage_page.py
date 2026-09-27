@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal, QTimer
 from PySide6.QtGui import (
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from equipment.valve import Valve
 from ui.components.valve_item import ValveItem
 from ui.components.agitator_item import AgitatorItem
+from ui.components.pump_popup import PumpPopup
 
 
 # Valve tag convention for process area 01 — Milk Storage:
@@ -940,120 +941,6 @@ class DetailSection(QFrame):
 # Click-on-symbol control popups
 # ============================================================
 
-class PumpPopup(QFrame):
-    command_requested = Signal(str, str)
-    mode_requested = Signal(str, str)
-
-    def __init__(self, parent=None):
-        super().__init__(
-            parent,
-            Qt.WindowType.Popup,
-        )
-
-        self.setObjectName("PumpPopup")
-        self.pump_id: str | None = None
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(10, 8, 10, 8)
-        root.setSpacing(6)
-
-        self.title = QLabel("Pump")
-        self.title.setObjectName("PopupTitle")
-        root.addWidget(self.title)
-
-        self.state = QLabel("State: —")
-        self.command = QLabel("Command: —")
-        self.interlock = QLabel("Interlock: —")
-
-        root.addWidget(self.state)
-        root.addWidget(self.command)
-        root.addWidget(self.interlock)
-
-        self.mode = ModeSelector()
-        self.mode.mode_requested.connect(
-            self._mode_changed
-        )
-        root.addWidget(self.mode)
-
-        buttons = QHBoxLayout()
-        buttons.setSpacing(5)
-
-        self.start_button = QPushButton("Start")
-        self.stop_button = QPushButton("Stop")
-
-        self.start_button.clicked.connect(
-            lambda: self._send("START")
-        )
-        self.stop_button.clicked.connect(
-            lambda: self._send("STOP")
-        )
-
-        buttons.addWidget(self.start_button)
-        buttons.addWidget(self.stop_button)
-        root.addLayout(buttons)
-
-        self._refresh()
-
-    def open_for(
-        self,
-        pump_id: str,
-        description: str,
-        state: str,
-        command: str | None,
-        interlock: str | None,
-        mode: str,
-        global_pos,
-    ) -> None:
-        self.pump_id = pump_id
-
-        self.title.setText(
-            f"{pump_id} — {description}"
-        )
-        self.state.setText(
-            f"State: {state or '—'}"
-        )
-        self.command.setText(
-            f"Command: {command or '—'}"
-        )
-        self.interlock.setText(
-            f"Interlock: {interlock or '—'}"
-        )
-
-        self.mode.blockSignals(True)
-        self.mode.set_mode(mode)
-        self.mode.blockSignals(False)
-
-        self._refresh()
-        self.adjustSize()
-        self.move(global_pos)
-        self.show()
-        self.raise_()
-
-    def _mode_changed(self, mode: str) -> None:
-        if self.pump_id:
-            self.mode_requested.emit(
-                self.pump_id,
-                mode,
-            )
-        self._refresh()
-
-    def _refresh(self) -> None:
-        self.start_button.setEnabled(
-            self.mode.manual
-        )
-        self.stop_button.setEnabled(
-            self.mode.manual
-        )
-
-    def _send(self, command: str) -> None:
-        if (
-            self.pump_id
-            and self.mode.manual
-        ):
-            self.command_requested.emit(
-                self.pump_id,
-                command,
-            )
 
 
 # ============================================================
@@ -2321,13 +2208,17 @@ class MilkStorageCanvas(QWidget):
             else self.BLUE
         )
         painter.setFont(title_font)
+        # Keep both inactive and ACTIVE captions on one line.
+        # The old 190 px box was too narrow for
+        # "MILK RECEPTION • ACTIVE", so Qt wrapped/clipped ACTIVE.
         painter.drawText(
             QRectF(
-                milk_inlet_x + 18.0,
-                43,
-                190,
+                milk_inlet_x - 145.0,
+                28,
+                290,
                 24,
             ),
+            Qt.AlignmentFlag.AlignCenter,
             (
                 "MILK RECEPTION • ACTIVE"
                 if reception_active
@@ -2836,26 +2727,60 @@ class MilkStorageCanvas(QWidget):
                 )
 
         # ----------------------------------------------------
+        # Shared pump geometry for BOTH:
+        #   1) the physical milk line,
+        #   2) the active-route halo / movement overlay.
+        #
+        # This keeps the animated route exactly on top of the real
+        # collector / discharge line around 01-PM1.
+        # ----------------------------------------------------
+        pump_rect = _fit_pixmap_rect(
+            self.pump_pixmap,
+            center_x=170.0,
+            top=return_y - 30.0,
+            max_w=58.0,
+            max_h=58.0,
+        )
+
+        self._pump_rect = pump_rect
+
+        # Mirrored 01-PM1:
+        # RIGHT side = suction from the storage collector.
+        suction_port = QPointF(
+            pump_rect.right(),
+            pump_rect.center().y(),
+        )
+
+        # The visible upper discharge nozzle in the mirrored pump PNG is
+        # slightly left of the geometric centre.  Anchor the riser there
+        # instead of to the bounding-box centre.
+        discharge_port = QPointF(
+            pump_rect.left() + pump_rect.width() * 0.16,
+            pump_rect.top() - 5.0,
+        )
+
+        # Use the EXACT same endpoints as the physical process line.
+        route_suction_port = QPointF(
+            suction_port.x(),
+            suction_port.y(),
+        )
+        route_discharge_port = QPointF(
+            discharge_port.x(),
+            discharge_port.y(),
+        )
+        route_pasteurization_top_y = (
+            return_y
+            - 122.0
+        )
+        route_section_a_cip_valve_x = 788.0
+
+        # ----------------------------------------------------
         # Active-route halo.
         #
         # Paint it BEFORE equipment pixmaps. This is important:
         # the halo uses the exact same pipe endpoints as the physical
         # route, while the tank image naturally masks the covered part.
         # ----------------------------------------------------
-        route_suction_port = QPointF(
-            245.0,
-            return_y,
-        )
-        route_discharge_port = QPointF(
-            190.0,
-            return_y,
-        )
-        route_pasteurization_top_y = (
-            return_y
-            - 122.0
-        )
-        route_section_a_cip_valve_x = 730.0
-
         self._paint_active_route_overlays(
             painter,
             supply_y=supply_y,
@@ -3172,30 +3097,9 @@ class MilkStorageCanvas(QWidget):
         #
         # The pump itself forms the lower-left elbow of the route.
         # ----------------------------------------------------
-        pump_rect = _fit_pixmap_rect(
-            self.pump_pixmap,
-            center_x=170.0,
-            top=return_y - 30.0,
-            max_w=58.0,
-            max_h=58.0,
-        )
-
-        self._pump_rect = pump_rect
-
-        # Mirrored 01-PM1:
-        # RIGHT side = suction from the storage collector.
-        suction_port = QPointF(
-            pump_rect.right(),
-            pump_rect.center().y(),
-        )
-
-        # The visible upper discharge nozzle in the mirrored pump PNG is
-        # slightly left of the geometric centre.  Anchor the riser there
-        # instead of to the bounding-box centre.
-        discharge_port = QPointF(
-            pump_rect.left() + pump_rect.width() * 0.16,
-            pump_rect.top() - 5.0
-        )
+        # Reuse the same precomputed pump geometry that is already used
+        # by the active-route overlay, so the real line and the movement
+        # indication stay perfectly aligned.
 
         painter.setPen(
             physical_pen
@@ -3352,6 +3256,164 @@ class MilkStorageCanvas(QWidget):
             "CIP RETURN",
         )
 
+        # Final symbol pass: keep every valve symbol ABOVE any active
+        # route halo / flow overlay and above the restored physical core.
+        self._redraw_valve_symbols(
+            painter,
+            supply_y=supply_y,
+            return_y=return_y,
+            right_section_y=right_section_y,
+        )
+
+    def _redraw_valve_symbols(
+        self,
+        painter: QPainter,
+        *,
+        supply_y: float,
+        return_y: float,
+        right_section_y: float,
+    ) -> None:
+        # Common header valves.
+        for valve_id, valve_x in (
+            ("01-VC101", 205.0),
+            ("01-V101", 490.0),
+            ("01-V102", 760.0),
+            ("01-V103", 860.0),
+            ("01-V104", 1130.0),
+            ("01-VC102", 1490.0),
+        ):
+            self._valve_items[valve_id].draw(
+                painter,
+                QPointF(valve_x, supply_y),
+            )
+
+        # Lower return / routing valves.
+        for valve_id, valve_x, valve_y in (
+            ("01-V401", 330.0, return_y),
+            ("01-V402", 520.0, return_y),
+            ("01-VC401", 788.0, return_y),
+            ("01-V403", 930.0, right_section_y),
+            ("01-V404", 1160.0, right_section_y),
+            ("01-VC402", 1428.0, right_section_y),
+        ):
+            self._valve_items[valve_id].draw(
+                painter,
+                QPointF(valve_x, valve_y),
+            )
+
+        # Tank route / return valves.
+        for index, tank_id in enumerate(self.TANK_IDS, start=1):
+            geometry = self._geometry.get(tank_id)
+            if geometry is None:
+                continue
+
+            supply_port = geometry["supply_port"]
+            product_port = geometry["product_port"]
+
+            inlet_center = QPointF(
+                supply_port.x(),
+                supply_y + 44.0,
+            )
+            outlet_header_y = (
+                right_section_y
+                if tank_id in ("01-TK1C", "01-TK1D")
+                else return_y
+            )
+            outlet_center = QPointF(
+                product_port.x(),
+                outlet_header_y - 32.0,
+            )
+
+            self._valve_items[f"01-V20{index}"].draw(
+                painter,
+                inlet_center,
+            )
+            self._valve_items[f"01-V30{index}"].draw(
+                painter,
+                outlet_center,
+            )
+
+    def _draw_segment_with_gaps(
+        self,
+        painter: QPainter,
+        start: QPointF,
+        end: QPointF,
+        *,
+        gaps: Sequence[float],
+        half_gap: float = 14.0,
+    ) -> None:
+        if abs(start.y() - end.y()) < 0.1:
+            y = start.y()
+            low = min(start.x(), end.x())
+            high = max(start.x(), end.x())
+            cuts = []
+            for value in sorted(gaps):
+                gap_start = max(low, value - half_gap)
+                gap_end = min(high, value + half_gap)
+                if gap_end > gap_start:
+                    cuts.append((gap_start, gap_end))
+            cursor = low
+            for gap_start, gap_end in cuts:
+                if gap_start > cursor:
+                    painter.drawLine(QPointF(cursor, y), QPointF(gap_start, y))
+                cursor = max(cursor, gap_end)
+            if cursor < high:
+                painter.drawLine(QPointF(cursor, y), QPointF(high, y))
+            return
+
+        if abs(start.x() - end.x()) < 0.1:
+            x = start.x()
+            low = min(start.y(), end.y())
+            high = max(start.y(), end.y())
+            cuts = []
+            for value in sorted(gaps):
+                gap_start = max(low, value - half_gap)
+                gap_end = min(high, value + half_gap)
+                if gap_end > gap_start:
+                    cuts.append((gap_start, gap_end))
+            cursor = low
+            for gap_start, gap_end in cuts:
+                if gap_start > cursor:
+                    painter.drawLine(QPointF(x, cursor), QPointF(x, gap_start))
+                cursor = max(cursor, gap_end)
+            if cursor < high:
+                painter.drawLine(QPointF(x, cursor), QPointF(x, high))
+            return
+
+        painter.drawLine(start, end)
+
+    def _route_segment_gaps(
+        self,
+        start: QPointF,
+        end: QPointF,
+        *,
+        supply_y: float,
+        return_y: float,
+        right_section_y: float,
+        supply_port: QPointF,
+        product_port: QPointF,
+        outlet_y: float,
+    ) -> list[float]:
+        gaps: list[float] = []
+
+        if abs(start.y() - end.y()) < 0.1:
+            y = start.y()
+            if abs(y - supply_y) < 0.1:
+                gaps.extend([205.0, 490.0, 760.0, 860.0, 1130.0, 1490.0])
+            elif abs(y - return_y) < 0.1:
+                gaps.extend([330.0, 520.0, 788.0])
+            elif abs(y - right_section_y) < 0.1:
+                gaps.extend([930.0, 1160.0, 1428.0])
+
+        elif abs(start.x() - end.x()) < 0.1:
+            x = start.x()
+            if abs(x - supply_port.x()) < 0.1:
+                gaps.append(supply_y + 44.0)
+            if abs(x - product_port.x()) < 0.1:
+                gaps.append(outlet_y - 32.0)
+
+        return gaps
+
     def _paint_active_route_overlays(
         self,
         painter: QPainter,
@@ -3488,7 +3550,7 @@ class MilkStorageCanvas(QWidget):
                     paths.extend((
                         (
                             QPointF(
-                                155.0,
+                                216.0,
                                 supply_y,
                             ),
                             QPointF(
@@ -3517,7 +3579,7 @@ class MilkStorageCanvas(QWidget):
                             ),
                             QPointF(
                                 section_a_cip_valve_x
-                                + 58.0,
+                                + 11.0,
                                 return_y,
                             ),
                         ),
@@ -3526,7 +3588,7 @@ class MilkStorageCanvas(QWidget):
                     paths.extend((
                         (
                             QPointF(
-                                1540.0,
+                                1479.0,
                                 supply_y,
                             ),
                             QPointF(
@@ -3554,7 +3616,7 @@ class MilkStorageCanvas(QWidget):
                                 right_section_y,
                             ),
                             QPointF(
-                                1486.0,
+                                1415.0,
                                 right_section_y,
                             ),
                         ),
@@ -3564,6 +3626,23 @@ class MilkStorageCanvas(QWidget):
                 operation
                 == "TRANSFER_TO_PASTEURIZATION"
             ):
+                # Match the real 01-PM1 pipe geometry exactly:
+                # - collector line ends at the visible suction fitting,
+                # - discharge highlight follows the visible riser only,
+                #   and stops at the base of the blue direction arrow.
+                suction_line_end = QPointF(
+                    suction_port.x() - 2.0,
+                    suction_port.y(),
+                )
+                discharge_line_start = QPointF(
+                    discharge_port.x(),
+                    discharge_port.y() + 3.0,
+                )
+                arrow_base = QPointF(
+                    discharge_port.x(),
+                    pasteurization_top_y + 28.0,
+                )
+
                 paths.append((
                     product_port,
                     QPointF(
@@ -3582,7 +3661,7 @@ class MilkStorageCanvas(QWidget):
                             return_y,
                         ),
                         QPointF(
-                            suction_port.x(),
+                            suction_line_end.x(),
                             return_y,
                         ),
                     ))
@@ -3614,21 +3693,15 @@ class MilkStorageCanvas(QWidget):
                                 return_y,
                             ),
                             QPointF(
-                                suction_port.x(),
+                                suction_line_end.x(),
                                 return_y,
                             ),
                         ),
                     ))
 
                 paths.append((
-                    QPointF(
-                        discharge_port.x(),
-                        discharge_port.y(),
-                    ),
-                    QPointF(
-                        discharge_port.x(),
-                        pasteurization_top_y,
-                    ),
+                    discharge_line_start,
+                    arrow_base,
                 ))
 
             painter.setPen(
@@ -3636,16 +3709,27 @@ class MilkStorageCanvas(QWidget):
             )
 
             for start, end in paths:
-                painter.drawLine(
+                self._draw_segment_with_gaps(
+                    painter,
                     start,
                     end,
+                    gaps=self._route_segment_gaps(
+                        start,
+                        end,
+                        supply_y=supply_y,
+                        return_y=return_y,
+                        right_section_y=right_section_y,
+                        supply_port=supply_port,
+                        product_port=product_port,
+                        outlet_y=outlet_y,
+                    ),
                 )
 
-            # Restore the original physical pipe in the centre.
-            # The only visible route indication is therefore the narrow
-            # blue/purple halo around it.
+            # Restore the physical pipe in the centre.
+            # For CIP routes, tint the active pipe itself purple, while
+            # keeping valve symbols and CIP arrows untouched.
             physical_core_pen = QPen(
-                self.BLUE,
+                self.PURPLE if operation == "CIP" else self.BLUE,
                 5,
                 Qt.PenStyle.SolidLine,
                 Qt.PenCapStyle.SquareCap,
@@ -3656,9 +3740,20 @@ class MilkStorageCanvas(QWidget):
             )
 
             for start, end in paths:
-                painter.drawLine(
+                self._draw_segment_with_gaps(
+                    painter,
                     start,
                     end,
+                    gaps=self._route_segment_gaps(
+                        start,
+                        end,
+                        supply_y=supply_y,
+                        return_y=return_y,
+                        right_section_y=right_section_y,
+                        supply_port=supply_port,
+                        product_port=product_port,
+                        outlet_y=outlet_y,
+                    ),
                 )
 
     @staticmethod
@@ -4634,14 +4729,28 @@ class MilkStoragePage(QWidget):
                     "command"
                 ),
                 interlock=(
-                    "FAULT"
-                    if data.get(
-                        "fault",
-                        False,
+                    data.get(
+                        "interlock"
                     )
-                    else None
+                    or (
+                        "FAULT"
+                        if data.get(
+                            "fault",
+                            False,
+                        )
+                        else None
+                    )
                 ),
             )
+
+            self._object_modes[
+                pump_id
+            ] = str(
+                data.get(
+                    "mode",
+                    "AUTO",
+                )
+            ).upper()
 
     def _runtime_transfer_requested(
         self,
