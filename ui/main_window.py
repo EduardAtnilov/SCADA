@@ -27,6 +27,8 @@ from ui.header import Header
 from ui.info_panel import InfoPanel
 from ui.overview_page import OverviewPage
 from ui.milk_storage_page import MilkStoragePage
+from ui.pasteurization_page import PasteurizationPage
+
 
 
 class MainWindow(QMainWindow):
@@ -174,10 +176,13 @@ class MainWindow(QMainWindow):
             "Milk Storage",
         )
 
+        self.pasteurization_page = PasteurizationPage()
+
         self.tabs.addTab(
-            self.create_page(),
+            self.pasteurization_page,
             "Pasteurization",
         )
+
         self.tabs.addTab(
             self.create_page(),
             "Separation",

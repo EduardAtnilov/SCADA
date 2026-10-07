@@ -1454,14 +1454,70 @@ class TankDetailPanel(QFrame):
             )
         )
 
-        self.route.setText(
-            str(
-                data.get(
-                    "active_route"
-                )
-                or "—"
-            )
+        active_route = data.get(
+            "active_route"
         )
+        route_state = str(
+            data.get(
+                "route_state"
+            )
+            or ""
+        )
+
+        if active_route:
+            compact_state = {
+                "PRE_MIX": "PRE-MIX",
+                "WAIT_PRE_MIX": "PRE-MIX",
+                "ENSURE_PUMP_STOPPED": "PREPARING",
+                "WAIT_PUMP_STOPPED": "PREPARING",
+                "CLOSE_CONFLICTS": "ROUTING",
+                "WAIT_CONFLICTS_CLOSED": "ROUTING",
+                "OPEN_ROUTE": "ROUTING",
+                "WAIT_ROUTE_OPEN": "ROUTING",
+                "START_PUMP": "STARTING",
+                "WAIT_PUMP_RUNNING": "STARTING",
+                "ACTIVE": "ACTIVE",
+                "STOP_PUMP": "STOPPING",
+                "WAIT_PUMP_STOP_AFTER_RUN": "STOPPING",
+                "CLOSE_ROUTE": "STOPPING",
+                "WAIT_ROUTE_CLOSED": "STOPPING",
+                "FAULT": "FAULT",
+            }.get(
+                route_state,
+                route_state,
+            )
+
+            self.route.setText(
+                (
+                    f"{active_route} · {compact_state}"
+                    if compact_state
+                    else str(active_route)
+                )
+            )
+            self.route.setToolTip(
+                str(
+                    data.get(
+                        "route_fault"
+                    )
+                    or (
+                        "Transfer is waiting for the 5-minute "
+                        "pre-discharge mix."
+                        if route_state
+                        in (
+                            "PRE_MIX",
+                            "WAIT_PRE_MIX",
+                        )
+                        else ""
+                    )
+                )
+            )
+        else:
+            self.route.setText(
+                "—"
+            )
+            self.route.setToolTip(
+                ""
+            )
 
         self.cip_state.setText(
             str(
@@ -1509,9 +1565,44 @@ class TankDetailPanel(QFrame):
             self.transfer_button.setEnabled(
                 True
             )
-            self.transfer_button.setToolTip(
-                "Stop the automatic route from this tank."
-            )
+
+            if str(
+                data.get(
+                    "route_state"
+                )
+                or ""
+            ) == "FAULT":
+                self.transfer_button.setToolTip(
+                    str(
+                        data.get(
+                            "route_fault"
+                        )
+                        or (
+                            "Route is in FAULT. Stop performs "
+                            "a safe shutdown and releases the route."
+                        )
+                    )
+                )
+            elif str(
+                data.get(
+                    "route_state"
+                )
+                or ""
+            ) in (
+                "PRE_MIX",
+                "WAIT_PRE_MIX",
+            ):
+                self.transfer_button.setToolTip(
+                    (
+                        "Pre-discharge mixing is in progress. "
+                        "Keep the agitator in AUTO, or press Stop "
+                        "to cancel the transfer."
+                    )
+                )
+            else:
+                self.transfer_button.setToolTip(
+                    "Stop the automatic route from this tank."
+                )
         else:
             self.transfer_button.setText(
                 "Send to Pasteurization"

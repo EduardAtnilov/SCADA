@@ -13,8 +13,6 @@ from core.routes.milk_storage import (
 
 class RouteState(StrEnum):
     PRECHECK = "PRECHECK"
-    PRE_MIX = "PRE_MIX"
-    WAIT_PRE_MIX = "WAIT_PRE_MIX"
     ENSURE_PUMP_STOPPED = "ENSURE_PUMP_STOPPED"
     WAIT_PUMP_STOPPED = "WAIT_PUMP_STOPPED"
     CLOSE_CONFLICTS = "CLOSE_CONFLICTS"
@@ -319,9 +317,12 @@ class MilkSourceAutomation:
             # "active" intentionally means that the automatic sequence
             # exists, not only that it already reached ACTIVE.
             # This lets the UI offer Stop while valves are still moving.
+            # The route remains operator-owned even in FAULT.
+            # Keeping transfer_active=True lets the UI offer Stop Transfer
+            # so the operator can perform a safe shutdown/release instead
+            # of getting trapped with a disabled Send button.
             "transfer_active": (
                 transfer is not None
-                and transfer.state != RouteState.FAULT
             ),
             "transfer_permissive": transfer_permissive,
             "transfer_inhibit_reason": transfer_reason,
@@ -567,7 +568,22 @@ class MilkSourceAutomation:
             return False
 
         if execution.state == RouteState.FAULT:
-            return False
+            # A faulted route is still owned by automation.  Allow the
+            # operator's Stop command to perform the normal safe shutdown:
+            # stop the route pump first (if present), then close route
+            # valves and release resources.
+            execution.fault_reason = None
+
+            if execution.plan.pump_id:
+                execution.change_state(
+                    RouteState.STOP_PUMP
+                )
+            else:
+                execution.change_state(
+                    RouteState.CLOSE_ROUTE
+                )
+
+            return True
 
         if (
             execution.plan.pump_id
@@ -613,74 +629,19 @@ class MilkSourceAutomation:
             if reason is not None:
                 return self._fault(execution, reason)
 
-            if (
-                plan.operation
-                == StorageOperation.TRANSFER_TO_PASTEURIZATION
-                and bool(
-                    self._tank_data(
-                        snapshot,
-                        plan.tank_id,
-                    ).get(
-                        "agitator_premix_required",
-                        False,
-                    )
-                )
-            ):
-                execution.change_state(
-                    RouteState.PRE_MIX
-                )
-            else:
-                execution.change_state(
-                    RouteState.ENSURE_PUMP_STOPPED
-                    if plan.pump_id
-                    else RouteState.CLOSE_CONFLICTS
-                )
-
-            return []
-
-        if state == RouteState.PRE_MIX:
+            # Transfer does NOT depend on agitator mode/state.
+            #
+            # If the tank has just been received, the milk can be sent
+            # directly to pasteurization.  If the operator intentionally
+            # keeps the agitator MANUAL/OFF, that must not block transfer.
+            #
+            # AUTO agitator behaviour during FEEDING remains owned by
+            # StorageTank, but it is not a transfer prerequisite.
             execution.change_state(
-                RouteState.WAIT_PRE_MIX
+                RouteState.ENSURE_PUMP_STOPPED
+                if plan.pump_id
+                else RouteState.CLOSE_CONFLICTS
             )
-            return []
-
-        if state == RouteState.WAIT_PRE_MIX:
-            tank = self._tank_data(
-                snapshot,
-                plan.tank_id,
-            )
-
-            if str(
-                tank.get(
-                    "agitator_mode",
-                    "AUTO",
-                )
-            ).upper() != "AUTO":
-                return self._fault(
-                    execution,
-                    "Agitator must be in AUTO for pre-mix.",
-                )
-
-            interlock = tank.get(
-                "agitator_interlock"
-            )
-
-            if interlock:
-                return self._fault(
-                    execution,
-                    str(interlock),
-                )
-
-            if bool(
-                tank.get(
-                    "agitator_premix_complete",
-                    False,
-                )
-            ):
-                execution.change_state(
-                    RouteState.ENSURE_PUMP_STOPPED
-                )
-                return []
 
             return []
 
@@ -1091,26 +1052,6 @@ class MilkSourceAutomation:
                 )
             ):
                 return "Low-level interlock is active."
-
-            if (
-                bool(
-                    tank.get(
-                        "agitator_premix_required",
-                        False,
-                    )
-                )
-                and str(
-                    tank.get(
-                        "agitator_mode",
-                        "AUTO",
-                    )
-                ).upper()
-                != "AUTO"
-            ):
-                return (
-                    "Agitator must be in AUTO "
-                    "for pre-discharge mixing."
-                )
 
             if not bool(
                 snapshot.get(

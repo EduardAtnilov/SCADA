@@ -6,7 +6,6 @@ from typing import Any, Mapping
 from core.automation.milk_source import (
     AutomationCommand,
     MilkSourceAutomation,
-    RouteState,
 )
 from core.routes.milk_storage import (
     CIP_ROUTES,
@@ -858,25 +857,6 @@ class MilkSourceController:
                 routes,
             )
 
-            pre_mix_requested = any(
-                (
-                    route["tank_id"]
-                    == tank_id
-                    and route["operation"]
-                    == (
-                        StorageOperation
-                        .TRANSFER_TO_PASTEURIZATION
-                        .value
-                    )
-                    and route["state"]
-                    in (
-                        RouteState.PRE_MIX.value,
-                        RouteState.WAIT_PRE_MIX.value,
-                    )
-                )
-                for route in routes
-            )
-
             # Keep common tank actuals synchronized without making the
             # physical simulator responsible for equipment behaviour.
             model.state = state
@@ -913,9 +893,6 @@ class MilkSourceController:
                     tank_data[
                         "temperature_c"
                     ]
-                ),
-                pre_mix_requested=(
-                    pre_mix_requested
                 ),
             )
 
