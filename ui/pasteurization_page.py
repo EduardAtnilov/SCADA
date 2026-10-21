@@ -150,6 +150,7 @@ class PasteurizationCanvas(QWidget):
         *,
         pump_image_path: Path | None = None,
         tank_image_path: Path | None = None,
+        exchanger_image_path: Path | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -180,6 +181,11 @@ class PasteurizationCanvas(QWidget):
         self.tank_pixmap = (
             _trim_visual_pixmap(QPixmap(str(tank_image_path)))
             if tank_image_path is not None
+            else QPixmap()
+        )
+        self.exchanger_pixmap = (
+            _trim_visual_pixmap(QPixmap(str(exchanger_image_path)))
+            if exchanger_image_path is not None
             else QPixmap()
         )
         self._equipment_pixmaps: dict[str, QPixmap] = {}
@@ -222,7 +228,15 @@ class PasteurizationCanvas(QWidget):
 
     def _build_process(self):
         o, r = self._object, self._route
-        o('02-BT1','Balance Tank','tank',(140,440,104,140),inlet=(140,550),outlet=(244,550),divert=(192,440))
+        o(
+            '02-BT1',
+            'Balance Tank',
+            'tank',
+            (130,455,125,125),
+            inlet=(149,550),
+            outlet=(237,550),
+            divert=(237,480),
+        )
         o('02-PM2','Feed Pump','pump',(295,529,65,47),inlet=(295,550),outlet=(329,529))
         o('02-FT1','Flow','instrument',(397,526,42,42),inlet=(397,547),outlet=(439,547))
         o('02-V201','Flow Diversion Valve','diverter',(279,248,42,80),inlet=(321,290),forward=(279,290),divert=(300,328))
@@ -231,8 +245,15 @@ class PasteurizationCanvas(QWidget):
           heating_in=(1070,515),heating_out=(1152,445),
           regen_ii_hot_in=(1008,250),regen_ii_hot_out=(865,355),
           regen_i_hot_in=(865,355),regen_i_hot_out=(748,250),
-          cooling_in=(692,250),cooling_out=(580,355),ice_cooling_in=(580,355),product_out=(420,355),
-          hw_in=(1152,345),hw_out=(1030,265),cw_in=(675,515),cw_out=(605,515),iw_in=(470,515),iw_out=(540,515))
+          cooling_in=(692,250),cooling_out=(580,355),ice_cooling_in=(580,355),product_out=(452,355),
+          hw_in=(1152,345),hw_out=(1030,265),cw_in=(670,515),cw_out=(582,515),iw_in=(465,515),iw_out=(507,515))
+        # The asset's real BLUE plate fields (after transparent trim and canvas
+        # placement) differ from the older nominal 140px section layout.
+        # The water/ice path endpoints below are SCHEMATIC display anchors:
+        # they are intentionally placed strictly inside their blue fields,
+        # not at physical nozzles on the steel vertical support columns.
+        # Blue x-ranges: ice ~449..522 (centre 486), cold ~549..702 (centre 626).
+        # The real connections can be modelled separately in equipment/routes.
         # Two regeneration stages surround the off-page separator. All five packs
         # share one frame; water and ice water remain separate physical sections.
         self.sections=((440,580,'Ice Water Cooling'),(580,720,'Cooling'),
@@ -245,8 +266,8 @@ class PasteurizationCanvas(QWidget):
         o('02-PM4','Hot Water Pump','pump',(1160,173,65,47),inlet=(1160,194),outlet=(1194,173))
         o('02-EX1','Expansion Vessel','vessel',(1374,174,52,64),inlet=(1400,174))
         o('02-TV1','Steam Control Valve','valve',(1384,110,32,34),inlet=(1416,127),outlet=(1384,127))
-        o('02-CWV1','Cooling Water Valve','valve_v',(659,555,32,34),inlet=(675,589),outlet=(675,555))
-        o('02-IWV1','Ice Water Valve','valve_v',(454,555,32,34),inlet=(470,589),outlet=(470,555))
+        o('02-CWV1','Cooling Water Valve','valve_v',(654,549,32,34),inlet=(670,583),outlet=(670,549))
+        o('02-IWV1','Ice Water Valve','valve_v',(449,549,32,34),inlet=(465,583),outlet=(465,549))
         for obj in self.objects:
             if obj.kind.startswith('valve'):
                 self.valves[obj.tag]=ValveItem(obj.tag,obj.title,'vertical' if obj.kind=='valve_v' else 'horizontal',self)
@@ -254,8 +275,8 @@ class PasteurizationCanvas(QWidget):
         o('OUT','PRODUCT OUT','boundary',(46,234,135,53),inlet=(70,265))
         o('03-SEP1.OUT','TO SEPARATION','boundary',(1270,633,250,41),inlet=(1485,652))
         o('03-SEP1.IN','FROM SEPARATION','boundary',(1280,565,240,44),outlet=(1485,595))
-        o('CW','COLD WATER','boundary',(586,618,111,38),supply=(675,620),return_out=(605,620))
-        o('IW','ICE WATER','boundary',(437,618,123,38),supply=(470,620),return_out=(540,620))
+        o('CW','COLD WATER','boundary',(586,608,111,38),supply=(670,610),return_out=(582,610))
+        o('IW','ICE WATER','boundary',(437,608,123,38),supply=(465,610),return_out=(507,610))
         o('STEAM','STEAM','boundary',(1450,106,110,30),supply=(1535,127))
         o('COND','CONDENSATE','boundary',(1120,109,109,29),outlet=(1135,127))
         o('CIP','CIP STATION','boundary',(48,34,145,88),supply=(170,77),return_out=(170,105))
@@ -330,10 +351,20 @@ class PasteurizationCanvas(QWidget):
             (600,355),
             arrow=2,
         )
-        r('ice_cooling','Product · ice water section','product','02-HT1.ice_cooling_in','02-HT1.product_out',(570,355),(550,305),(478,305),(458,355),arrow=2)
+        r('ice_cooling','Product · ice water section','product','02-HT1.ice_cooling_in','02-HT1.product_out',(560,355),(542,310),(488,310),(470,355),arrow=2)
         r('cooling_diverter','Cooled product → diversion valve','product','02-HT1.product_out','02-V201.inlet',(400,355),(400,290),arrow=2)
         r('product_forward','Forward flow · product outlet','product','02-V201.forward','OUT.inlet',(230,290),(230,265),arrow=2)
-        r('product_divert','Diverted milk → balance tank','divert','02-V201.divert','02-BT1.divert',(300,388),(192,388),arrow=2)
+        r(
+            'product_divert',
+            'Diverted milk → balance tank',
+            'divert',
+            '02-V201.divert',
+            '02-BT1.divert',
+            (300,388),
+            (270,388),
+            (270,480),
+            arrow=2,
+        )
         # Pressure gauge is mounted on the external product loop itself,
         # between Regeneration I and the first cooling section.
         self.ports['02-HT1.pressure_tap'] = QPointF(720,210)
@@ -356,11 +387,11 @@ class PasteurizationCanvas(QWidget):
         r('condensate','Condensate return','condensate','02-HW1.condensate','COND.outlet')
         r('cold_supply','Cold water supply','cold_water','CW.supply','02-CWV1.inlet')
         r('cold_valve','Cold water → water cooling section','cold_water','02-CWV1.outlet','02-HT1.cw_in')
-        r('cold_pass','Cooling water · independent plate pack','cold_water','02-HT1.cw_in','02-HT1.cw_out',(675,440),(658,395),(624,395),(605,440),arrow=2)
+        r('cold_pass','Cooling water · independent plate pack','cold_water','02-HT1.cw_in','02-HT1.cw_out',(670,440),(647,405),(605,405),(582,440),arrow=2)
         r('cold_return','Cold water return','cold_water','02-HT1.cw_out','CW.return_out')
         r('ice_supply','Ice water supply','ice_water','IW.supply','02-IWV1.inlet')
         r('ice_valve','Ice water → ice cooling section','ice_water','02-IWV1.outlet','02-HT1.iw_in')
-        r('ice_pass','Ice water · independent plate pack','ice_water','02-HT1.iw_in','02-HT1.iw_out',(470,440),(488,395),(521,395),(540,440),arrow=2)
+        r('ice_pass','Ice water · independent plate pack','ice_water','02-HT1.iw_in','02-HT1.iw_out',(465,440),(476,405),(496,405),(507,440),arrow=2)
         r('ice_return','Ice water return','ice_water','02-HT1.iw_out','IW.return_out')
         self.cip_paths=(((170,77),(83,77),(83,137)),((83,160),(83,105),(170,105)))
 
@@ -406,6 +437,15 @@ class PasteurizationCanvas(QWidget):
             if obj.kind == "tank" and not self.tank_pixmap.isNull():
                 self._equipment_pixmaps[obj.tag] = self.tank_pixmap
                 self._equipment_draw_rects[obj.tag] = QRectF(obj.bounds)
+                continue
+
+            if obj.kind == "exchanger" and not self.exchanger_pixmap.isNull():
+                # Keep the exact same visual footprint as before so every route,
+                # section label and instrument stays aligned. We deliberately do
+                # not preserve aspect ratio here: the generated PHE artwork is
+                # stretched into the established 02-HT1 geometry.
+                self._equipment_pixmaps[obj.tag] = self.exchanger_pixmap
+                self._equipment_draw_rects[obj.tag] = obj.bounds.adjusted(-30, -6, 30, 22)
                 continue
 
             # The large PHE has tie rods / fittings extending a little beyond
@@ -510,6 +550,10 @@ class PasteurizationCanvas(QWidget):
                 pixmap,
                 obj.bounds,
             )
+        elif obj.kind == "exchanger" and not self.exchanger_pixmap.isNull():
+            # Use the dedicated pasteurizer image in the same place/scale as the
+            # previous drawn 02-HT1 body so the mnemonic stays unchanged.
+            target = draw_rect
         else:
             # Runtime-rendered equipment pixmaps already have exact geometry.
             target = draw_rect
@@ -1085,8 +1129,8 @@ class PasteurizationCanvas(QWidget):
         self._text(p, QRectF(188, 365, 116, 18), "DIVERT → BALANCE", 8, "#1477d4", True)
         self._text(p, QRectF(1190, 627, 325, 22), "TO SEPARATION · target 40 °C", 10, "#1477d4", True)
         self._text(p, QRectF(1268, 564, 247, 22), "FROM SEPARATION · 03-SEP1", 10, "#1477d4", True)
-        self._text(p, QRectF(440, 635, 123, 20), "ICE WATER", 9, "#399fb8", True)
-        self._text(p, QRectF(584, 635, 111, 20), "COLD WATER", 9, "#369eaf", True)
+        self._text(p, QRectF(440, 625, 123, 20), "ICE WATER", 9, "#399fb8", True)
+        self._text(p, QRectF(584, 625, 111, 20), "COLD WATER", 9, "#369eaf", True)
         self._text(p, QRectF(1453, 103, 93, 18), "STEAM", 9, "#e68016", True)
         self._text(p, QRectF(1112, 99, 105, 18), "CONDENSATE", 8, "#d77c1a", True)
         self._text(p, QRectF(1250, 329, 118, 20), "HW SUPPLY", 8, "#c76657", True)
@@ -1571,12 +1615,26 @@ class PasteurizationPage(QWidget):
             / "pump.png"
         )
 
+        # Dedicated 02-BT1 balance-tank artwork.
+        # Keep it as a normal project resource, exactly like the Milk Storage
+        # equipment images. Pipelines remain independent ProcessRoute objects.
         tank_image = (
             project_root
             / "resources"
             / "images"
             / "tanks"
-            / "storage_tank.png"
+            / "balance_tank.png"
+        )
+
+        # Dedicated 02-HT1 pasteurizer artwork.
+        # The asset is inserted as an independent object, while all process
+        # pipes remain separate ProcessRoute items layered on top of it.
+        exchanger_image = (
+            project_root
+            / "resources"
+            / "images"
+            / "process"
+            / "pasteurizer_phe.png"
         )
 
         self.setStyleSheet("""
@@ -1680,6 +1738,7 @@ class PasteurizationPage(QWidget):
         self.canvas = PasteurizationCanvas(
             pump_image_path=pump_image,
             tank_image_path=tank_image,
+            exchanger_image_path=exchanger_image,
             parent=self.content_frame,
         )
 
