@@ -132,7 +132,9 @@ class PasteurizationCanvas(QWidget):
     equipment_selected = Signal(str, str)
     separation_requested = Signal()
     DESIGN_W = 1600.0
-    DESIGN_H = 680.0
+    # Preserve a small caption margin below the enlarged 02-PM2 pump.
+    # Reserve room for the lowered feed pump and its label without clipping.
+    DESIGN_H = 718.0
     MEDIA = {
         "milk": QColor("#1477d4"),
         "product": QColor("#1477d4"),
@@ -232,13 +234,26 @@ class PasteurizationCanvas(QWidget):
             '02-BT1',
             'Balance Tank',
             'tank',
-            (130,455,125,125),
-            inlet=(149,550),
-            outlet=(237,550),
-            divert=(237,480),
+            # Same 140% image size as before; shift only the tank 15 design
+            # units left. Keep both lower flange centres on the existing milk
+            # pipe axis y=658; pump and flowmeter remain unchanged.
+            (2.5,497.0,210,210),
+            # Nozzle positions are fitted from the ACTUAL transparent PNG,
+            # after alpha trim + keep-aspect-ratio placement, not guessed
+            # from the 225 x 225 object bounds. Both bottom pipe centre-lines
+            # meet the visible flange axes; pipe endpoints extend under steel.
+            inlet=(34.5,658.0),
+            outlet=(174.0,658.0),
+            divert=(182.2,532.6),
         )
-        o('02-PM2','Feed Pump','pump',(295,529,65,47),inlet=(295,550),outlet=(329,529))
-        o('02-FT1','Flow','instrument',(397,526,42,42),inlet=(397,547),outlet=(439,547))
+        # Milk Storage's 01-PM1 fits the SAME pump.png into 58 x 58,
+        # not 58 x 47. With the old height=47, changing the width to 58
+        # often made no visible difference because aspect ratio is kept.
+        # Lower the pump with the tank; retain the 58 x 58 Milk Storage scale.
+        # The discharge x is centred on the pump PNG's actual TOP nozzle.
+        o('02-PM2','Feed Pump','pump',(234.5,629,58,58),
+          inlet=(244.3,658),outlet=(282.7,636))
+        o('02-FT1','Flow','instrument',(328,590,42,42),inlet=(328,611),outlet=(370,611))
         o('02-V201','Flow Diversion Valve','diverter',(279,248,42,80),inlet=(321,290),forward=(279,290),divert=(300,328))
         o('02-HT1','Pasteurizer','exchanger',(440,250,700,277),
           raw_in=(745,515),raw_out=(805,515),regen_ii_in=(885,515),regen_ii_out=(958,515),
@@ -246,13 +261,16 @@ class PasteurizationCanvas(QWidget):
           regen_ii_hot_in=(1008,250),regen_ii_hot_out=(865,355),
           regen_i_hot_in=(865,355),regen_i_hot_out=(748,250),
           cooling_in=(692,250),cooling_out=(580,355),ice_cooling_in=(580,355),product_out=(452,355),
-          hw_in=(1152,345),hw_out=(1030,265),cw_in=(670,515),cw_out=(582,515),iw_in=(465,515),iw_out=(507,515))
+          hw_in=(1152,345),hw_out=(1030,265),cw_in=(588,515),cw_out=(676,515),iw_in=(475,515),iw_out=(517,515))
         # The asset's real BLUE plate fields (after transparent trim and canvas
         # placement) differ from the older nominal 140px section layout.
         # The water/ice path endpoints below are SCHEMATIC display anchors:
         # they are intentionally placed strictly inside their blue fields,
         # not at physical nozzles on the steel vertical support columns.
-        # Blue x-ranges: ice ~449..522 (centre 486), cold ~549..702 (centre 626).
+        # Centerlines measured from the displayed blue plate fields (not the
+        # structural section widths): ice x=496, cold water x=632.
+        # Cooling water enters at the LEFT and exits at the RIGHT; its valve
+        # and off-page supply are aligned on the same left-hand axis (x=588).
         # The real connections can be modelled separately in equipment/routes.
         # Two regeneration stages surround the off-page separator. All five packs
         # share one frame; water and ice water remain separate physical sections.
@@ -266,17 +284,20 @@ class PasteurizationCanvas(QWidget):
         o('02-PM4','Hot Water Pump','pump',(1160,173,65,47),inlet=(1160,194),outlet=(1194,173))
         o('02-EX1','Expansion Vessel','vessel',(1374,174,52,64),inlet=(1400,174))
         o('02-TV1','Steam Control Valve','valve',(1384,110,32,34),inlet=(1416,127),outlet=(1384,127))
-        o('02-CWV1','Cooling Water Valve','valve_v',(654,549,32,34),inlet=(670,583),outlet=(670,549))
-        o('02-IWV1','Ice Water Valve','valve_v',(449,549,32,34),inlet=(465,583),outlet=(465,549))
+        o('02-CWV1','Cooling Water Valve','valve_v',(572,528,32,34),inlet=(588,545),outlet=(588,545))
+        o('02-IWV1','Ice Water Valve','valve_v',(459,528,32,34),inlet=(475,545),outlet=(475,545))
         for obj in self.objects:
             if obj.kind.startswith('valve'):
                 self.valves[obj.tag]=ValveItem(obj.tag,obj.title,'vertical' if obj.kind=='valve_v' else 'horizontal',self)
-        o('IN','FROM MILK STORAGE','boundary',(28,516,105,52),outlet=(50,550))
+        # The inlet now spans 104.5 design units (was 41.5, i.e. 2.52x).
+        # Its upstream end uses the left white gutter of the wide SCADA canvas;
+        # the source/boundary and no other equipment are moved.
+        o('IN','FROM MILK STORAGE','boundary',(-82,621,105,52),outlet=(-70,658))
         o('OUT','PRODUCT OUT','boundary',(46,234,135,53),inlet=(70,265))
         o('03-SEP1.OUT','TO SEPARATION','boundary',(1270,633,250,41),inlet=(1485,652))
         o('03-SEP1.IN','FROM SEPARATION','boundary',(1280,565,240,44),outlet=(1485,595))
-        o('CW','COLD WATER','boundary',(586,608,111,38),supply=(670,610),return_out=(582,610))
-        o('IW','ICE WATER','boundary',(437,608,123,38),supply=(465,610),return_out=(507,610))
+        o('CW','COLD WATER','boundary',(586,559,111,27),supply=(588,586),return_out=(676,586))
+        o('IW','ICE WATER','boundary',(437,559,123,27),supply=(475,586),return_out=(517,586))
         o('STEAM','STEAM','boundary',(1450,106,110,30),supply=(1535,127))
         o('COND','CONDENSATE','boundary',(1120,109,109,29),outlet=(1135,127))
         o('CIP','CIP STATION','boundary',(48,34,145,88),supply=(170,77),return_out=(170,105))
@@ -291,8 +312,13 @@ class PasteurizationCanvas(QWidget):
         self.separator_inlet_temperature=40.0
         r('milk_storage','Milk Storage → balance tank','milk','IN.outlet','02-BT1.inlet')
         r('tank_feed','Balance tank → feed pump','milk','02-BT1.outlet','02-PM2.inlet')
-        r('pump_flow','Feed pump → flow regulator','milk','02-PM2.outlet','02-FT1.inlet',(329,512),(375,512),(375,547),arrow=1)
-        r('raw_regen','Raw milk → regeneration I','milk','02-FT1.outlet','02-HT1.raw_in',(475,547),(475,530),(745,530),arrow=2)
+        # A visible 25-unit vertical riser from the TOP pump nozzle, then
+        # one right turn and a straight run to FT1. No U-shaped detour.
+        r('pump_flow','Feed pump → flow regulator','milk','02-PM2.outlet','02-FT1.inlet',(282.7,611),arrow=1)
+        # After FT1 the feed is one level horizontal run beneath both coolant
+        # service drops. It turns upward only at its actual PHE process port.
+        # The short pump discharge loop is kept separately in pump_flow.
+        r('raw_regen','Raw milk → regeneration I','milk','02-FT1.outlet','02-HT1.raw_in',(745,611),arrow=0)
         r('regen_i_preheat','Regeneration I · preheat before separation','milk','02-HT1.raw_in','02-HT1.raw_out',(745,440),(760,395),(790,395),(805,440),arrow=2)
         r('to_separator','Preheated milk → Separation · target 40 °C','milk','02-HT1.raw_out','03-SEP1.OUT.inlet',(805,652),arrow=1)
         r('from_separator','Separation → regeneration II','milk','03-SEP1.IN.outlet','02-HT1.regen_ii_in',(885,595),arrow=0)
@@ -361,8 +387,8 @@ class PasteurizationCanvas(QWidget):
             '02-V201.divert',
             '02-BT1.divert',
             (300,388),
-            (270,388),
-            (270,480),
+            (257,388),
+            (257,532.6),
             arrow=2,
         )
         # Pressure gauge is mounted on the external product loop itself,
@@ -387,11 +413,11 @@ class PasteurizationCanvas(QWidget):
         r('condensate','Condensate return','condensate','02-HW1.condensate','COND.outlet')
         r('cold_supply','Cold water supply','cold_water','CW.supply','02-CWV1.inlet')
         r('cold_valve','Cold water → water cooling section','cold_water','02-CWV1.outlet','02-HT1.cw_in')
-        r('cold_pass','Cooling water · independent plate pack','cold_water','02-HT1.cw_in','02-HT1.cw_out',(670,440),(647,405),(605,405),(582,440),arrow=2)
+        r('cold_pass','Cooling water · independent plate pack','cold_water','02-HT1.cw_in','02-HT1.cw_out',(588,440),(611,395),(653,395),(676,440),arrow=2)
         r('cold_return','Cold water return','cold_water','02-HT1.cw_out','CW.return_out')
         r('ice_supply','Ice water supply','ice_water','IW.supply','02-IWV1.inlet')
         r('ice_valve','Ice water → ice cooling section','ice_water','02-IWV1.outlet','02-HT1.iw_in')
-        r('ice_pass','Ice water · independent plate pack','ice_water','02-HT1.iw_in','02-HT1.iw_out',(465,440),(476,405),(496,405),(507,440),arrow=2)
+        r('ice_pass','Ice water · independent plate pack','ice_water','02-HT1.iw_in','02-HT1.iw_out',(475,440),(486,395),(506,395),(517,440),arrow=2)
         r('ice_return','Ice water return','ice_water','02-HT1.iw_out','IW.return_out')
         self.cip_paths=(((170,77),(83,77),(83,137)),((83,160),(83,105),(170,105)))
 
@@ -1088,18 +1114,20 @@ class PasteurizationCanvas(QWidget):
             True,
         )
 
-        self._text(
-            p,
-            QRectF(
-                x - 20,
-                y + 17,
-                w + 40,
-                17,
-            ),
-            title,
-            9,
-            "#607e97",
-        )
+        # Some compact SCADA captions show only an equipment tag.
+        if title:
+            self._text(
+                p,
+                QRectF(
+                    x - 20,
+                    y + 17,
+                    w + 40,
+                    17,
+                ),
+                title,
+                9,
+                "#607e97",
+            )
 
     def _card(self, p, x, y, w, label, value):
         p.setBrush(QColor("#fbfdff")); p.setPen(QPen(QColor("#d6e1ed"), 1))
@@ -1112,25 +1140,38 @@ class PasteurizationCanvas(QWidget):
         for x0, x1, title in self.sections:
             self._text(p, QRectF(x0 - 6, 211, x1 - x0 - 20, 20), title, 9, bold=True)
         for args in (
-            (122, 588, 140, "02-BT1", "Balance Tank"), (278, 583, 100, "02-PM2", "Feed Pump"),
-            (368, 577, 100, "02-FT1", "Flow Regulator"), (1000, 610, 105, "02-PM3", "Booster Pump"),
+            # Tank tag and its English subtitle are above the tank.
+            # 02-PM2's tag is drawn BELOW the pump separately.
+            (37, 451, 140, "02-BT1", "Balance Tank"),
+            (299, 635, 100, "02-FT1", "Flow Regulator"), (1000, 610, 105, "02-PM3", "Booster Pump"),
             (1359, 270, 174, "02-HLD1", "Holding Tube"), (1456, 21, 80, "02-TT1", "Temperature"),
             (1220, 77, 112, "02-HW1", "Water Heater"), (1162, 263, 60, "02-PM4", "Circulation"),
             (1440, 179, 90, "02-EX1", "Expansion"), (1353, 23, 100, "02-TV1", "Steam Valve"), (239, 211, 124, "02-V201", "Flow Diversion"),
         ):
             self._caption(p, *args)
+        # Match Milk Storage's centered tag treatment; compute the label's
+        # centre from the actually FITTED pump artwork, not magic x numbers.
+        pump = next(obj for obj in self.objects if obj.tag == "02-PM2")
+        pump_art = _fit_pixmap_rect(self.pump_pixmap, pump.bounds)
+        pump_label_top = min(pump_art.bottom() + 6, self.DESIGN_H - 19)
+        self._text(
+            p,
+            QRectF(pump_art.center().x() - 45, pump_label_top, 90, 18),
+            "02-PM2",
+            10,
+            bold=True,
+        )
         self._text(p, QRectF(652, 124, 136, 20), "02-PT1 · Pressure", 9, bold=True)
-        self._card(p, 330, 453, 100, "Flow", self.values["flow"])
+        self._card(p, 302, 467, 100, "Flow", self.values["flow"])
         self._card(p, 1380, 471, 129, "Holding time", self.values["holding"])
         self._card(p, 1233, 26, 114, "Pasteurization", self.values["temperature"])
         self._card(p, 330, 153, 119, "Outlet", self.values["outlet"])
-        self._text(p, QRectF(14, 507, 114, 36), "FROM MILK\nSTORAGE", 9, "#1477d4", True)
+        # Centred over the longer incoming horizontal pipe, away from BT1.
+        self._text(p, QRectF(-74, 611, 112, 36), "FROM MILK\nSTORAGE", 8, "#1477d4", True)
         self._text(p, QRectF(40, 233, 166, 20), "PRODUCT OUT", 10, "#1477d4", True)
         self._text(p, QRectF(188, 365, 116, 18), "DIVERT → BALANCE", 8, "#1477d4", True)
         self._text(p, QRectF(1190, 627, 325, 22), "TO SEPARATION · target 40 °C", 10, "#1477d4", True)
         self._text(p, QRectF(1268, 564, 247, 22), "FROM SEPARATION · 03-SEP1", 10, "#1477d4", True)
-        self._text(p, QRectF(440, 625, 123, 20), "ICE WATER", 9, "#399fb8", True)
-        self._text(p, QRectF(584, 625, 111, 20), "COLD WATER", 9, "#369eaf", True)
         self._text(p, QRectF(1453, 103, 93, 18), "STEAM", 9, "#e68016", True)
         self._text(p, QRectF(1112, 99, 105, 18), "CONDENSATE", 8, "#d77c1a", True)
         self._text(p, QRectF(1250, 329, 118, 20), "HW SUPPLY", 8, "#c76657", True)
